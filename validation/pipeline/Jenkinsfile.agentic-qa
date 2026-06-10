@@ -76,10 +76,11 @@ def AGENTIC_IMAGE = ''
 def PIPELINE_RESULT = [:]
 
 // ── Fixed workspace-relative paths (never user-controlled) ────────
-def ENV_FILE     = '.agentic_env'          // docker --env-file
-def GCP_CREDS    = '.google_creds.json'    // SA key copy in workspace
-def CTX_FILE     = '.agentic_context.txt'  // ADDITIONAL_CONTEXT staging
-def STATE_FILE   = 'pipeline_state.json'   // resource tracking for cleanup
+def ENV_FILE      = '.agentic_env'              // docker --env-file
+def GCP_CREDS     = '.google_creds.json'        // SA key copy in workspace
+def CTX_FILE      = '.agentic_context.txt'      // ADDITIONAL_CONTEXT staging
+def STATE_FILE    = 'pipeline_state.json'        // resource tracking for cleanup
+def TRIGGER_MAP   = 'jenkins_trigger_mapping.json' // written from JENKINS_TRIGGER_MAPPING param
 
 pipeline {
     // Same agent type as Jenkinsfile.individual.e2e — any Docker-capable node.
@@ -189,6 +190,25 @@ pipeline {
 
                         // ── Stage ADDITIONAL_CONTEXT to file (never a shell arg) ──
                         writeFile file: CTX_FILE, text: params.ADDITIONAL_CONTEXT ?: ''
+
+                        // ── Validate and stage JENKINS_TRIGGER_MAPPING ────────────
+                        // The mapping JSON is supplied as a parameter (not committed
+                        // to the repo) because it contains internal Jenkins job names
+                        // and infrastructure details. Validate it is non-empty and
+                        // parses as valid JSON before writing to the workspace.
+                        def triggerMapRaw = params.JENKINS_TRIGGER_MAPPING?.trim() ?: ''
+                        if (!triggerMapRaw) {
+                            error('JENKINS_TRIGGER_MAPPING is required and must not be empty. ' +
+                                  'Paste the contents of jenkins_trigger_mapping.json into the parameter.')
+                        }
+                        try {
+                            new groovy.json.JsonSlurper().parseText(triggerMapRaw)
+                        } catch (jsonEx) {
+                            error("JENKINS_TRIGGER_MAPPING is not valid JSON: ${jsonEx.message}")
+                        }
+                        // Write to workspace — content is NEVER echoed or logged.
+                        writeFile file: TRIGGER_MAP, text: triggerMapRaw
+                        sh "chmod 600 '${TRIGGER_MAP}'"
 
                         // ── Write Google SA key to workspace for container mount ──
                         // GOOGLE_SA_FILE is an agent-local path from Jenkins credentials.
@@ -636,9 +656,10 @@ All inputs validated."""
             // Archive outputs; delete sensitive files
             archiveArtifacts artifacts: 'pipeline_summary.json, cleanup_result.json',
                              allowEmptyArchive: true
-            // Remove credentials staging files from workspace
+            // Remove all sensitive staging files from workspace.
+            // TRIGGER_MAP contains internal job names — must not persist.
             sh """
-                rm -f '${ENV_FILE}' '${GCP_CREDS}' '${CTX_FILE}' || true
+                rm -f '${ENV_FILE}' '${GCP_CREDS}' '${CTX_FILE}' '${TRIGGER_MAP}' || true
             """
         }
     }
