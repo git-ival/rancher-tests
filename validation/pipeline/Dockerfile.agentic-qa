@@ -1,0 +1,60 @@
+# ──────────────────────────────────────────────────────────────────
+# Dockerfile.agentic-qa
+#
+# Multi-stage build for the agentic-qa CLI.
+# Produces a lean Alpine image (~50MB) containing:
+#   - agentic-qa     (statically-linked Go binary)
+#   - gotestsum      (for downstream test execution)
+#   - kubectl        (for optional Rancher API context)
+#   - bash, curl, git, jq  (standard CI utilities)
+#
+# No Node.js or Python — Qase MCP server is remote-only.
+# ──────────────────────────────────────────────────────────────────
+
+# ── Stage 1: Build ────────────────────────────────────────────────
+FROM golang:1.25-alpine3.22 AS builder
+
+RUN apk add --no-cache git ca-certificates
+
+WORKDIR /src
+
+# Download dependencies first (layer caching)
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source and build
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -trimpath \
+    -o /agentic-qa ./cmd/agentic-qa
+
+# Build gotestsum (used by downstream test containers)
+RUN CGO_ENABLED=0 go install gotest.tools/gotestsum@v1.13.0
+
+# ── Stage 2: Runtime ──────────────────────────────────────────────
+FROM alpine:3.22
+
+RUN apk add --no-cache \
+    bash \
+    curl \
+    git \
+    ca-certificates \
+    jq
+
+# The CLI binary
+COPY --from=builder /agentic-qa /usr/local/bin/agentic-qa
+
+# gotestsum
+COPY --from=builder /root/go/bin/gotestsum /usr/local/bin/gotestsum
+
+# kubectl (pinned to a stable minor)
+RUN KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)" && \
+    curl -sLO "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl" && \
+    chmod +x kubectl && mv kubectl /usr/local/bin/
+
+# Security hardening
+RUN adduser -D -u 1000 agenticqa
+USER agenticqa
+WORKDIR /home/agenticqa
+
+ENTRYPOINT ["agentic-qa"]

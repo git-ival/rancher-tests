@@ -1,0 +1,187 @@
+package cmd
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+
+	"github.com/rancher/tests/internal/agenticqa/jenkins"
+	"github.com/rancher/tests/internal/agenticqa/qase"
+	"github.com/rancher/tests/internal/agenticqa/types"
+)
+
+var (
+	waitTriggeredJobs string
+	waitPollInterval  int
+	waitOutputFile    string
+	waitJenkinsURL    string
+)
+
+func init() {
+	f := waitCmd.Flags()
+	f.StringVar(&waitTriggeredJobs, "triggered-jobs", "", "Path to triggered_jobs.json (required)")
+	f.IntVar(&waitPollInterval, "poll-interval", 120, "Poll interval in seconds")
+	f.StringVar(&waitOutputFile, "output-file", "", "Path to write completed_jobs.json (required)")
+	f.StringVar(&waitJenkinsURL, "jenkins-url", "", "Jenkins server URL")
+
+	_ = waitCmd.MarkFlagRequired("triggered-jobs")
+	_ = waitCmd.MarkFlagRequired("output-file")
+
+	rootCmd.AddCommand(waitCmd)
+}
+
+var waitCmd = &cobra.Command{
+	Use:   "wait",
+	Short: "Wait for test completion",
+	Long:  `Polls Jenkins for each triggered job until all reach a terminal state, then completes the Qase run.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		ctx := cmd.Context()
+		startTime := time.Now()
+
+		var triggered types.TriggeredJobs
+		if err := loadJSON(waitTriggeredJobs, &triggered); err != nil {
+			return fmt.Errorf("loading triggered jobs: %w", err)
+		}
+
+		jenkinsURL := waitJenkinsURL
+		if jenkinsURL == "" {
+			jenkinsURL = os.Getenv("JENKINS_URL")
+		}
+		if jenkinsURL == "" {
+			return fmt.Errorf("Jenkins URL is required (--jenkins-url or JENKINS_URL)")
+		}
+
+		jenkinsUser := os.Getenv("JENKINS_USER")
+		jenkinsToken := os.Getenv("JENKINS_TOKEN")
+		jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
+
+		// Resolve build numbers from queue IDs first
+		for i := range triggered.Jobs {
+			job := &triggered.Jobs[i]
+			if job.QueueID != nil && job.BuildNumber == nil {
+				logrus.Infof("Resolving build number for %s (queue %d)", job.JobName, *job.QueueID)
+				buildNum, err := jClient.GetQueueBuildNumber(ctx, *job.QueueID)
+				if err != nil {
+					logrus.Warnf("Could not resolve build number for %s: %v", job.JobName, err)
+				} else {
+					job.BuildNumber = &buildNum
+				}
+			}
+		}
+
+		// Poll until all jobs are terminal
+		var completed []types.CompletedJob
+		var failed []types.CompletedJob
+		pending := make(map[int]*types.TriggeredJob)
+
+		for i := range triggered.Jobs {
+			job := &triggered.Jobs[i]
+			if job.BuildNumber != nil && !isTerminalStatus(job.Status) {
+				pending[i] = job
+			} else if job.Status == "trigger_failed" || job.Status == "dry_run" {
+				completed = append(completed, types.CompletedJob{
+					JobName: job.JobName,
+					Status:  job.Status,
+				})
+			}
+		}
+
+		pollDuration := time.Duration(waitPollInterval) * time.Second
+
+		for len(pending) > 0 {
+			logrus.Infof("Waiting for %d jobs... (poll interval: %s)", len(pending), pollDuration)
+			time.Sleep(pollDuration)
+
+			for idx, job := range pending {
+				// Extract folder/job from the job name
+				folder, jobName := splitJobName(job.JobName)
+
+				status, err := jClient.GetBuildStatus(ctx, folder, jobName, *job.BuildNumber)
+				if err != nil {
+					logrus.Warnf("Error polling %s #%d: %v", job.JobName, *job.BuildNumber, err)
+					continue
+				}
+
+				if status.Result != "IN_PROGRESS" {
+					cj := types.CompletedJob{
+						JobName:         job.JobName,
+						BuildNumber:     job.BuildNumber,
+						Status:          status.Result,
+						DurationMinutes: float64(status.DurationMS) / 60000.0,
+						LogURL:          status.LogURL,
+					}
+
+					if status.Result == "SUCCESS" {
+						completed = append(completed, cj)
+					} else {
+						failed = append(failed, cj)
+					}
+					delete(pending, idx)
+
+					logrus.Infof("Job %s #%d finished: %s (%.1f min)",
+						job.JobName, *job.BuildNumber, status.Result, cj.DurationMinutes)
+				}
+			}
+		}
+
+		// Complete Qase run
+		if triggered.QaseRunID != nil && !dryRun {
+			mcpClient := qase.NewMCPClient(mcpURL)
+			qaseToken := os.Getenv("QASE_API_TOKEN")
+
+			if mcpClient.IsConfigured() {
+				if _, err := mcpClient.CallTool(ctx, "qase_complete_run", map[string]any{
+					"code": qaseProject,
+					"id":   *triggered.QaseRunID,
+				}); err != nil {
+					logrus.Warnf("MCP complete run failed: %v", err)
+				} else {
+					logrus.Infof("Completed Qase run %d via MCP", *triggered.QaseRunID)
+				}
+			} else if qaseToken != "" {
+				qaseClient := qase.NewClient(qaseToken)
+				if err := qaseClient.CompleteTestRun(ctx, triggered.QaseProject, *triggered.QaseRunID); err != nil {
+					logrus.Warnf("Failed to complete Qase run: %v", err)
+				} else {
+					logrus.Infof("Completed Qase run %d via REST", *triggered.QaseRunID)
+				}
+			}
+		}
+
+		result := types.CompletedJobs{
+			QaseRunID:            triggered.QaseRunID,
+			Completed:            completed,
+			Failed:               failed,
+			TotalDurationMinutes: time.Since(startTime).Minutes(),
+			CompletedAt:          time.Now().UTC().Format(time.RFC3339),
+		}
+
+		if err := saveJSON(waitOutputFile, result); err != nil {
+			return fmt.Errorf("writing output: %w", err)
+		}
+
+		logrus.Infof("All jobs complete: %d passed, %d failed → %s",
+			len(completed), len(failed), waitOutputFile)
+		return nil
+	},
+}
+
+func isTerminalStatus(s string) bool {
+	switch s {
+	case "SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "trigger_failed", "dry_run":
+		return true
+	}
+	return false
+}
+
+func splitJobName(name string) (folder, jobName string) {
+	parts := strings.SplitN(name, "/", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", name
+}

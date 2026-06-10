@@ -1,0 +1,546 @@
+#!/usr/bin/env groovy
+
+/**
+ * Jenkinsfile.agentic-qa
+ *
+ * Agentic QA Pipeline — AI-driven test identification, execution,
+ * analysis, and automated remediation for rancher/rancher changes.
+ *
+ * ──────────────────────────────────────────────────────────────────
+ * PARAMETER OWNERSHIP
+ * ──────────────────────────────────────────────────────────────────
+ * ALL parameters are defined exclusively jenkins-job-builder. This file 
+ * contains NO parameters{} block. Jenkins reads parameter definitions 
+ * from the generated job config; this script reads them via params.<NAME> 
+ * as usual.
+ *
+ * TRIGGER: MANUAL ONLY — use "Build with Parameters" in the Jenkins UI.
+ *
+ * ──────────────────────────────────────────────────────────────────
+ * RUNTIME
+ * ──────────────────────────────────────────────────────────────────
+ * The pipeline runs inside a container built from Dockerfile.agentic-qa.
+ * That image contains a single Go binary (`agentic-qa`) with cobra
+ * subcommands for each pipeline step, plus bash/curl/git/jq/kubectl.
+ * No Python, no Node.js, no pip install.
+ *
+ * ──────────────────────────────────────────────────────────────────
+ * SECURITY DESIGN
+ * ──────────────────────────────────────────────────────────────────
+ * 1. INPUT VALIDATION — every user-supplied string is validated against
+ *    a strict allowlist regex before touching any shell.
+ * 2. NO GROOVY INTERPOLATION IN sh() — all sh() blocks are single-
+ *    quoted; validated values reach the shell only via env vars.
+ * 3. ADDITIONAL_CONTEXT FILE STAGING — freeform TEXT is written to a
+ *    workspace file by Groovy, never as a shell argument.
+ *
+ * Required Credentials (Jenkins Credential Store):
+ *   github-api-token        Secret text — GitHub PAT
+ *   qase-api-token          Secret text — Qase API token
+ *   claude-api-key          Secret text — Anthropic API key
+ *   google-vertex-sa-key    Secret file — Google SA JSON key
+ *   github-copilot-token    Secret text — Copilot token
+ *   github-mcp-token        Secret text — GitHub MCP token (optional)
+ */
+
+// ── Validated env var names — only these appear in sh() blocks ────
+@groovy.transform.Field static final String VE_PR_NUMBER       = 'VE_PR_NUMBER'
+@groovy.transform.Field static final String VE_REPO            = 'VE_REPO'
+@groovy.transform.Field static final String VE_PROVIDER        = 'VE_PROVIDER'
+@groovy.transform.Field static final String VE_VERTEX_PROJECT  = 'VE_VERTEX_PROJECT'
+@groovy.transform.Field static final String VE_VERTEX_LOCATION = 'VE_VERTEX_LOCATION'
+@groovy.transform.Field static final String VE_SONNET_MODEL    = 'VE_SONNET_MODEL'
+@groovy.transform.Field static final String VE_HAIKU_MODEL     = 'VE_HAIKU_MODEL'
+@groovy.transform.Field static final String VE_QASE_PROJECT    = 'VE_QASE_PROJECT'
+@groovy.transform.Field static final String VE_QASE_RUN_NAME   = 'VE_QASE_RUN_NAME'
+@groovy.transform.Field static final String VE_MCP_URL         = 'VE_MCP_URL'
+@groovy.transform.Field static final String VE_TEST_TIMEOUT    = 'VE_TEST_TIMEOUT'
+@groovy.transform.Field static final String VE_MAX_RERUNS      = 'VE_MAX_RERUNS'
+@groovy.transform.Field static final String VE_CONTEXT_FILE    = 'VE_CONTEXT_FILE'
+@groovy.transform.Field static final String VE_AUTO_TRIGGER    = 'VE_AUTO_TRIGGER'
+@groovy.transform.Field static final String VE_AUTO_ISSUES     = 'VE_AUTO_ISSUES'
+@groovy.transform.Field static final String VE_AUTO_PRS        = 'VE_AUTO_PRS'
+@groovy.transform.Field static final String VE_USE_COPILOT     = 'VE_USE_COPILOT'
+@groovy.transform.Field static final String VE_DRY_RUN         = 'VE_DRY_RUN'
+@groovy.transform.Field static final String VE_CLEANUP_MODE    = 'VE_CLEANUP_MODE'
+
+// ── Allowlist patterns ────────────────────────────────────────────
+@groovy.transform.Field
+static final Map<String, java.util.regex.Pattern> PAT = [
+    PR_NUMBER:     ~/^\d{1,10}$/,
+    REPO:          ~/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/,
+    MODEL_ID:      ~/^claude-[a-z0-9\-]{2,60}$/,
+    GCP_PROJECT:   ~/^[a-z][a-z0-9\-]{4,28}[a-z0-9]$/,
+    GCP_LOCATION:  ~/^[a-z]{2,20}(-[a-z]{2,20}[0-9]?)?$/,
+    TIMEOUT:       ~/^\d{1,4}[smh]$/,
+    MAX_RERUNS:    ~/^([0-9]|10)$/,
+    QASE_PROJECT:  ~/^[A-Z0-9_]{2,10}$/,
+    QASE_RUN_NAME: ~/^[A-Za-z0-9 ._:#\/\-]{0,200}$/,
+    MCP_URL:       ~/^https?:\/\/[A-Za-z0-9_.\-]+(:\d{1,5})?\/(mcp|sse)$/,
+]
+
+def PIPELINE_RESULT = [:]
+
+// ── Shared persistent flags for every agentic-qa subcommand ──────
+// Built once in Setup, reused by every stage.
+def CLI_GLOBAL_FLAGS = ''
+
+pipeline {
+    agent {
+        kubernetes {
+            inheritFrom 'default'
+            yaml '''
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: agentic-qa
+    # Build from Dockerfile.agentic-qa or use pre-pushed image:
+    #   ghcr.io/rancher/agentic-qa:latest
+    # For now, reference a pre-built image. In production, use the
+    # Dockerfile.agentic-qa multi-stage build pushed to a registry.
+    image: ghcr.io/rancher/agentic-qa:latest
+    command: [cat]
+    tty: true
+    resources:
+      requests:
+        memory: "1Gi"
+        cpu: "500m"
+      limits:
+        memory: "2Gi"
+        cpu: "1"
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop: [ALL]
+'''
+        }
+    }
+
+    options {
+        timeout(time: 8, unit: 'HOURS')
+        timestamps()
+        ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '100'))
+        disableConcurrentBuilds()
+    }
+
+    // NO parameters{} block — parameters defined in JJB YAML only.
+
+    environment {
+        GITHUB_TOKEN                   = credentials('github-api-token')
+        QASE_API_TOKEN                 = credentials('qase-api-token')
+        CLAUDE_API_KEY                 = credentials('claude-api-key')
+        GOOGLE_APPLICATION_CREDENTIALS = credentials('google-vertex-sa-key')
+        COPILOT_TOKEN                  = credentials('github-copilot-token')
+        GITHUB_MCP_TOKEN               = credentials('github-mcp-token')
+    }
+
+    stages {
+
+        ////////////////////////////////////////////////////////////////////////
+        // STAGE 0: SETUP & VALIDATION
+        ////////////////////////////////////////////////////////////////////////
+        stage('Setup') {
+            steps {
+                container('agentic-qa') {
+                    script {
+                        // ── Validate all parameters ───────────────────────
+                        def prRaw = params.RANCHER_PR_NUMBER?.trim() ?: ''
+                        if (!prRaw.matches(PAT.PR_NUMBER))
+                            error("RANCHER_PR_NUMBER must be 1-10 digits. Got: '${prRaw.take(30)}'")
+                        env[VE_PR_NUMBER] = prRaw
+
+                        if (!params.RANCHER_REPO.matches(PAT.REPO))
+                            error("RANCHER_REPO must match owner/repo. Got: '${params.RANCHER_REPO.take(50)}'")
+                        env[VE_REPO] = params.RANCHER_REPO
+
+                        env[VE_PROVIDER] = params.LLM_PROVIDER
+
+                        if (params.LLM_PROVIDER == 'vertex-ai') {
+                            if (!params.VERTEX_PROJECT_ID?.trim())
+                                error('VERTEX_PROJECT_ID required for vertex-ai')
+                            if (!params.VERTEX_PROJECT_ID.matches(PAT.GCP_PROJECT))
+                                error("VERTEX_PROJECT_ID invalid. Got: '${params.VERTEX_PROJECT_ID.take(40)}'")
+                            if (!params.VERTEX_LOCATION.matches(PAT.GCP_LOCATION))
+                                error("VERTEX_LOCATION invalid. Got: '${params.VERTEX_LOCATION.take(40)}'")
+                        }
+                        env[VE_VERTEX_PROJECT]  = params.VERTEX_PROJECT_ID ?: ''
+                        env[VE_VERTEX_LOCATION] = params.VERTEX_LOCATION
+
+                        if (!params.SONNET_MODEL.matches(PAT.MODEL_ID))
+                            error("SONNET_MODEL invalid. Got: '${params.SONNET_MODEL.take(40)}'")
+                        if (!params.HAIKU_MODEL.matches(PAT.MODEL_ID))
+                            error("HAIKU_MODEL invalid. Got: '${params.HAIKU_MODEL.take(40)}'")
+                        env[VE_SONNET_MODEL] = params.SONNET_MODEL
+                        env[VE_HAIKU_MODEL]  = params.HAIKU_MODEL
+
+                        env[VE_QASE_PROJECT] = params.QASE_PROJECT
+
+                        def runName = params.QASE_TEST_RUN_NAME?.trim() ?: ''
+                        if (runName && !runName.matches(PAT.QASE_RUN_NAME))
+                            error('QASE_TEST_RUN_NAME has disallowed characters')
+                        env[VE_QASE_RUN_NAME] = runName ?:
+                            "Agentic QA - PR-${prRaw} - ${new Date().format('yyyy-MM-dd')}"
+
+                        def mcpUrl = params.QASE_MCP_SERVER_URL?.trim() ?: ''
+                        if (mcpUrl && !mcpUrl.matches(PAT.MCP_URL))
+                            error("QASE_MCP_SERVER_URL must be http(s)://host[:port]/(mcp|sse). Got: '${mcpUrl.take(100)}'")
+                        env[VE_MCP_URL] = mcpUrl
+
+                        if (!params.TEST_TIMEOUT.matches(PAT.TIMEOUT))
+                            error("TEST_TIMEOUT invalid. Got: '${params.TEST_TIMEOUT.take(20)}'")
+                        if (!params.MAX_RERUNS.matches(PAT.MAX_RERUNS))
+                            error("MAX_RERUNS must be 0-10. Got: '${params.MAX_RERUNS.take(5)}'")
+                        env[VE_TEST_TIMEOUT] = params.TEST_TIMEOUT
+                        env[VE_MAX_RERUNS]   = params.MAX_RERUNS
+
+                        env[VE_AUTO_TRIGGER]  = params.AUTO_TRIGGER_TESTS.toString()
+                        env[VE_AUTO_ISSUES]   = params.AUTO_CREATE_ISSUES.toString()
+                        env[VE_AUTO_PRS]      = params.AUTO_CREATE_PRS.toString()
+                        env[VE_USE_COPILOT]   = params.USE_COPILOT_FOR_FIXES.toString()
+                        env[VE_DRY_RUN]       = params.DRY_RUN.toString()
+                        env[VE_CLEANUP_MODE]  = params.CLEANUP_MODE.toString()
+
+                        // Stage ADDITIONAL_CONTEXT to file (never shell arg)
+                        def ctxFile = "${WORKSPACE}/.agentic_context.txt"
+                        writeFile file: ctxFile, text: params.ADDITIONAL_CONTEXT ?: ''
+                        env[VE_CONTEXT_FILE] = ctxFile
+
+                        // Initialize pipeline_state.json
+                        writeJSON file: "${WORKSPACE}/pipeline_state.json", json: [
+                            qase_runs: [], qase_defects: [],
+                            github_issues: [], github_prs: [],
+                        ]
+
+                        echo """=== Agentic QA Pipeline ===
+PR:        ${env[VE_REPO]}#${env[VE_PR_NUMBER]}
+Provider:  ${env[VE_PROVIDER]}
+Qase:      ${env[VE_QASE_PROJECT]}
+MCP:       ${env[VE_MCP_URL] ?: '(not configured)'}
+Dry run:   ${env[VE_DRY_RUN]}
+Cleanup:   ${env[VE_CLEANUP_MODE]}
+All inputs validated."""
+                    }
+
+                    // Validate credential connectivity
+                    sh '''
+                        agentic-qa validate \
+                            --provider       "$VE_PROVIDER"          \
+                            --vertex-project "$VE_VERTEX_PROJECT"    \
+                            --vertex-location "$VE_VERTEX_LOCATION"  \
+                            --qase-project   "$VE_QASE_PROJECT"
+                    '''
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 1: IDENTIFY TESTS                                [Haiku]
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 1: Identify Tests') {
+            steps {
+                container('agentic-qa') {
+                    script {
+                        def rc = sh(script: '''
+                            agentic-qa identify \
+                                --provider         "$VE_PROVIDER"          \
+                                --vertex-project   "$VE_VERTEX_PROJECT"    \
+                                --vertex-location  "$VE_VERTEX_LOCATION"   \
+                                --haiku-model      "$VE_HAIKU_MODEL"       \
+                                --qase-project     "$VE_QASE_PROJECT"      \
+                                --pr-number        "$VE_PR_NUMBER"         \
+                                --repo             "$VE_REPO"              \
+                                --mapping-file     "${WORKSPACE}/feature_test_mapping.json" \
+                                --output-file      "${WORKSPACE}/identified_tests.json"    \
+                                --additional-context-file "$VE_CONTEXT_FILE"
+                        ''', returnStatus: true)
+                        if (rc != 0) error("Step 1 failed (exit ${rc})")
+
+                        def d = readJSON file: "${WORKSPACE}/identified_tests.json"
+                        PIPELINE_RESULT['identified_tests'] = d
+                        echo "Tests: ${d.tests?.size() ?: 0} | Areas: ${d.feature_areas?.join(', ') ?: '(none)'}"
+                        if (!d.tests) { currentBuild.result = 'UNSTABLE' }
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 2: TRIGGER TESTS                                [Direct API]
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 2: Trigger Tests') {
+            when {
+                allOf {
+                    environment name: VE_AUTO_TRIGGER, value: 'true'
+                    environment name: VE_DRY_RUN,      value: 'false'
+                    expression { PIPELINE_RESULT['identified_tests']?.tests?.size() > 0 }
+                }
+            }
+            steps {
+                container('agentic-qa') {
+                    script {
+                        def rc = sh(script: '''
+                            agentic-qa trigger \
+                                --provider         "$VE_PROVIDER"          \
+                                --vertex-project   "$VE_VERTEX_PROJECT"    \
+                                --vertex-location  "$VE_VERTEX_LOCATION"   \
+                                --qase-project     "$VE_QASE_PROJECT"      \
+                                --mcp-url          "$VE_MCP_URL"           \
+                                --state-file       "${WORKSPACE}/pipeline_state.json" \
+                                --identified-tests "${WORKSPACE}/identified_tests.json" \
+                                --trigger-mapping  "${WORKSPACE}/jenkins_trigger_mapping.json" \
+                                --qase-run-name    "$VE_QASE_RUN_NAME"    \
+                                --test-timeout     "$VE_TEST_TIMEOUT"      \
+                                --pr-number        "$VE_PR_NUMBER"         \
+                                --repo             "$VE_REPO"              \
+                                --output-file      "${WORKSPACE}/triggered_jobs.json" \
+                                --jenkins-url      "${JENKINS_URL}"
+                        ''', returnStatus: true)
+                        if (rc != 0) error("Step 2 failed (exit ${rc})")
+
+                        def d = readJSON file: "${WORKSPACE}/triggered_jobs.json"
+                        PIPELINE_RESULT['triggered_jobs'] = d
+                        echo "Qase run: ${d.qase_run_id ?: 'N/A'} | Jobs: ${d.jobs?.size() ?: 0}"
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 2b: WAIT FOR TESTS
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 2b: Wait for Tests') {
+            when {
+                allOf {
+                    environment name: VE_AUTO_TRIGGER, value: 'true'
+                    environment name: VE_DRY_RUN,      value: 'false'
+                    expression { PIPELINE_RESULT['triggered_jobs']?.jobs?.size() > 0 }
+                }
+            }
+            steps {
+                container('agentic-qa') {
+                    script {
+                        timeout(time: 360, unit: 'MINUTES') {
+                            sh '''
+                                agentic-qa wait \
+                                    --provider         "$VE_PROVIDER"          \
+                                    --vertex-project   "$VE_VERTEX_PROJECT"    \
+                                    --vertex-location  "$VE_VERTEX_LOCATION"   \
+                                    --qase-project     "$VE_QASE_PROJECT"      \
+                                    --mcp-url          "$VE_MCP_URL"           \
+                                    --triggered-jobs   "${WORKSPACE}/triggered_jobs.json" \
+                                    --poll-interval    120                     \
+                                    --output-file      "${WORKSPACE}/completed_jobs.json" \
+                                    --jenkins-url      "${JENKINS_URL}"
+                            '''
+                        }
+                        def d = readJSON file: "${WORKSPACE}/completed_jobs.json"
+                        PIPELINE_RESULT['completed_jobs'] = d
+                        echo "OK: ${d.completed?.size() ?: 0} | Failed: ${d.failed?.size() ?: 0}"
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 3: ANALYZE RESULTS (TRIAGE)                     [Sonnet]
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 3: Analyze Results') {
+            when {
+                expression {
+                    def c = PIPELINE_RESULT['completed_jobs']
+                    return (c?.failed?.size() > 0 || c?.completed?.size() > 0)
+                }
+            }
+            steps {
+                container('agentic-qa') {
+                    script {
+                        def rc = sh(script: '''
+                            agentic-qa analyze \
+                                --provider           "$VE_PROVIDER"          \
+                                --vertex-project     "$VE_VERTEX_PROJECT"    \
+                                --vertex-location    "$VE_VERTEX_LOCATION"   \
+                                --sonnet-model       "$VE_SONNET_MODEL"      \
+                                --qase-project       "$VE_QASE_PROJECT"      \
+                                --mcp-url            "$VE_MCP_URL"           \
+                                --completed-jobs     "${WORKSPACE}/completed_jobs.json" \
+                                --triage-framework   "${WORKSPACE}/triage_framework.json" \
+                                --feature-mapping    "${WORKSPACE}/feature_test_mapping.json" \
+                                --output-file        "${WORKSPACE}/triage_results.json"     \
+                                --additional-context-file "$VE_CONTEXT_FILE"
+                        ''', returnStatus: true)
+                        if (rc != 0) echo "WARNING: Triage had errors (exit ${rc})"
+
+                        def d = readJSON file: "${WORKSPACE}/triage_results.json"
+                        PIPELINE_RESULT['triage'] = d
+                        echo "Product: ${d.product_defects?.size() ?: 0} | Test: ${d.test_defects?.size() ?: 0} | Config: ${d.config_issues?.size() ?: 0} | Pass: ${d.passed?.size() ?: 0}"
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 4: HANDLE DEFECTS                      [Sonnet + Haiku]
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 4: Handle Defects') {
+            when {
+                expression {
+                    def t = PIPELINE_RESULT['triage']
+                    return (t?.product_defects?.size() > 0 || t?.test_defects?.size() > 0)
+                }
+            }
+            steps {
+                container('agentic-qa') {
+                    script {
+                        sh '''
+                            agentic-qa defects \
+                                --provider           "$VE_PROVIDER"          \
+                                --vertex-project     "$VE_VERTEX_PROJECT"    \
+                                --vertex-location    "$VE_VERTEX_LOCATION"   \
+                                --sonnet-model       "$VE_SONNET_MODEL"      \
+                                --haiku-model        "$VE_HAIKU_MODEL"       \
+                                --qase-project       "$VE_QASE_PROJECT"      \
+                                --mcp-url            "$VE_MCP_URL"           \
+                                --state-file         "${WORKSPACE}/pipeline_state.json" \
+                                --dry-run="$VE_DRY_RUN"                     \
+                                --triage-results     "${WORKSPACE}/triage_results.json" \
+                                --product-repo       "$VE_REPO"              \
+                                --tests-repo         "rancher/tests"         \
+                                --pr-number          "$VE_PR_NUMBER"         \
+                                --auto-create-issues="$VE_AUTO_ISSUES"      \
+                                --auto-create-prs="$VE_AUTO_PRS"            \
+                                --use-copilot="$VE_USE_COPILOT"             \
+                                --output-file        "${WORKSPACE}/defect_actions.json"
+                        '''
+                        def d = readJSON file: "${WORKSPACE}/defect_actions.json"
+                        PIPELINE_RESULT['defect_actions'] = d
+                        echo "Issues: ${d.issues_created?.size() ?: 0} | PRs: ${d.prs_opened?.size() ?: 0} | Copilot: ${d.copilot_assignments?.size() ?: 0}"
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 5: HANDLE CONFIG FAILURES              [Haiku + Sonnet]
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 5: Handle Config Failures') {
+            when {
+                expression { PIPELINE_RESULT['triage']?.config_issues?.size() > 0 }
+            }
+            steps {
+                container('agentic-qa') {
+                    script {
+                        sh '''
+                            agentic-qa config-failures \
+                                --provider           "$VE_PROVIDER"          \
+                                --vertex-project     "$VE_VERTEX_PROJECT"    \
+                                --vertex-location    "$VE_VERTEX_LOCATION"   \
+                                --sonnet-model       "$VE_SONNET_MODEL"      \
+                                --haiku-model        "$VE_HAIKU_MODEL"       \
+                                --qase-project       "$VE_QASE_PROJECT"      \
+                                --mcp-url            "$VE_MCP_URL"           \
+                                --state-file         "${WORKSPACE}/pipeline_state.json" \
+                                --dry-run="$VE_DRY_RUN"                     \
+                                --triage-results     "${WORKSPACE}/triage_results.json" \
+                                --trigger-mapping    "${WORKSPACE}/jenkins_trigger_mapping.json" \
+                                --max-reruns         "$VE_MAX_RERUNS"        \
+                                --tests-repo         "rancher/tests"         \
+                                --auto-create-prs="$VE_AUTO_PRS"            \
+                                --output-file        "${WORKSPACE}/config_actions.json" \
+                                --jenkins-url        "${JENKINS_URL}"
+                        '''
+                        def d = readJSON file: "${WORKSPACE}/config_actions.json"
+                        PIPELINE_RESULT['config_actions'] = d
+                        echo "Reruns: ${d.reruns?.size() ?: 0} | Guards: ${d.guards?.size() ?: 0} | PRs: ${d.prs_opened?.size() ?: 0}"
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 6: CLEANUP
+        ////////////////////////////////////////////////////////////////////////
+        stage('Step 6: Cleanup') {
+            when { environment name: VE_CLEANUP_MODE, value: 'true' }
+            steps {
+                container('agentic-qa') {
+                    script {
+                        def rc = sh(script: '''
+                            agentic-qa cleanup \
+                                --provider         "$VE_PROVIDER"          \
+                                --vertex-project   "$VE_VERTEX_PROJECT"    \
+                                --vertex-location  "$VE_VERTEX_LOCATION"   \
+                                --qase-project     "$VE_QASE_PROJECT"      \
+                                --mcp-url          "$VE_MCP_URL"           \
+                                --state-file       "${WORKSPACE}/pipeline_state.json" \
+                                --dry-run="$VE_DRY_RUN"                   \
+                                --output-file      "${WORKSPACE}/cleanup_result.json"
+                        ''', returnStatus: true)
+                        if (rc != 0) echo "WARNING: Cleanup had errors (exit ${rc})"
+                        if (fileExists("${WORKSPACE}/cleanup_result.json")) {
+                            def d = readJSON file: "${WORKSPACE}/cleanup_result.json"
+                            PIPELINE_RESULT['cleanup'] = d
+                            echo "Runs deleted: ${d.qase_runs_deleted ?: 0} | Defects deleted: ${d.qase_defects_deleted ?: 0} | Issues closed: ${d.github_issues_closed ?: 0} | PRs closed: ${d.github_prs_closed ?: 0}"
+                        }
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // SUMMARY
+        ////////////////////////////////////////////////////////////////////////
+        stage('Summary') {
+            steps {
+                container('agentic-qa') {
+                    script {
+                        echo buildSummary(PIPELINE_RESULT)
+                        writeJSON file: "${WORKSPACE}/pipeline_summary.json",
+                                  json: PIPELINE_RESULT, pretty: 2
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            archiveArtifacts artifacts: 'pipeline_summary.json, cleanup_result.json',
+                             allowEmptyArchive: true
+        }
+        cleanup {
+            sh 'rm -f "${WORKSPACE}/.agentic_context.txt" 2>/dev/null || true'
+        }
+    }
+}
+
+// ── Helpers ───────────────────────────────────────────────────────
+
+def buildSummary(Map r) {
+    def sep = '=' * 70
+    def s = new StringBuilder()
+    s << sep << '\n  AGENTIC QA PIPELINE SUMMARY\n'
+    s << "  PR: ${env[VE_REPO]}#${env[VE_PR_NUMBER]}\n" << sep << '\n\n'
+
+    def t = r.identified_tests
+    s << "1. Tests identified: ${t?.tests?.size() ?: 0}  (${t?.feature_areas?.join(', ') ?: '-'})\n"
+
+    def j = r.triggered_jobs
+    s << "2. Jobs triggered: ${j?.jobs?.size() ?: 0}  Qase run: ${j?.qase_run_id ?: '-'}\n"
+
+    def tr = r.triage
+    s << "3. Product: ${tr?.product_defects?.size() ?: 0}  Test: ${tr?.test_defects?.size() ?: 0}  Config: ${tr?.config_issues?.size() ?: 0}  Pass: ${tr?.passed?.size() ?: 0}\n"
+
+    def da = r.defect_actions
+    s << "4. Issues: ${da?.issues_created?.size() ?: 0}  PRs: ${da?.prs_opened?.size() ?: 0}  Copilot: ${da?.copilot_assignments?.size() ?: 0}\n"
+
+    def ca = r.config_actions
+    s << "5. Reruns: ${ca?.reruns?.size() ?: 0}  Guards: ${ca?.guards?.size() ?: 0}  PRs: ${ca?.prs_opened?.size() ?: 0}\n"
+
+    def cl = r.cleanup
+    if (cl) s << "6. Cleanup: runs=${cl.qase_runs_deleted ?: 0} defects=${cl.qase_defects_deleted ?: 0} issues=${cl.github_issues_closed ?: 0} prs=${cl.github_prs_closed ?: 0}\n"
+
+    s << '\n' << sep
+    return s.toString()
+}
