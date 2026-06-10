@@ -1,0 +1,659 @@
+{
+  "version": "1.0",
+  "description": "Triage decision framework for Rancher QA test failure classification. Enables automated analysis of gotestsum JSON output to determine whether a failure is a product defect, test defect, or config/environment issue.",
+  "qase_projects": ["RANCHERINT", "RRT", "RM", "K3SRKE2"],
+  "gotestsum_actions": ["run", "output", "pass", "fail", "skip"],
+  "classification_rules": {
+    "config_environment_indicators": [
+      {
+        "id": "env_timeout_context",
+        "pattern": "context deadline exceeded",
+        "description": "Go context deadline exceeded, typically caused by infrastructure slowness or networking issues preventing operations from completing within allocated time.",
+        "confidence": "high",
+        "category": "timeout",
+        "examples": [
+          "context deadline exceeded",
+          "Post \"https://rancher.example.com/v3\": context deadline exceeded",
+          "Expected timeout error when GRB is not found: context deadline exceeded"
+        ]
+      },
+      {
+        "id": "env_timeout_io",
+        "pattern": "i/o timeout",
+        "description": "Low-level I/O timeout when connecting to a remote host. Indicates network-level connectivity failure between test runner and target infrastructure.",
+        "confidence": "high",
+        "category": "timeout",
+        "examples": [
+          "dial tcp 10.0.0.1:6443: i/o timeout",
+          "Get \"https://rancher.example.com\": dial tcp: i/o timeout"
+        ]
+      },
+      {
+        "id": "env_connection_refused",
+        "pattern": "connection refused",
+        "description": "Target service port not accepting connections. Service may not be running, or firewall rules block access.",
+        "confidence": "medium",
+        "category": "connectivity",
+        "examples": [
+          "dial tcp 127.0.0.1:6443: connect: connection refused",
+          "Get \"https://rancher.local:443\": dial tcp: connection refused"
+        ]
+      },
+      {
+        "id": "env_timed_out_waiting",
+        "pattern": "timed out waiting for",
+        "description": "Kubernetes wait.Poll or PollUntilContextTimeout exceeded. A resource did not reach the expected state within the configured timeout window.",
+        "confidence": "medium",
+        "category": "timeout",
+        "examples": [
+          "timed out waiting for kubeconfig admin-kubeconfig to be deleted",
+          "timed out waiting for user admin to exist",
+          "timed out waiting for ClusterRoleTemplateBinding crtb-xyz to be deleted",
+          "timed out waiting for GlobalRole gr-xyz to be deleted",
+          "timed out waiting for Project myproject to be deleted"
+        ]
+      },
+      {
+        "id": "env_cloud_throttle",
+        "pattern": "(ThrottlingException|RequestLimitExceeded|Rate exceeded|Too Many Requests|429|Throttling)",
+        "description": "Cloud provider API rate limiting. AWS, Azure, or GCP is throttling API requests from the test environment.",
+        "confidence": "high",
+        "category": "cloud_provider_rate_limit",
+        "examples": [
+          "429 Too Many Requests – retrying...",
+          "ThrottlingException: Rate exceeded",
+          "RequestLimitExceeded: Request limit exceeded",
+          "Too Many Requests: retry after 30 seconds"
+        ]
+      },
+      {
+        "id": "env_resource_exhaustion",
+        "pattern": "(insufficient capacity|InsufficientInstanceCapacity|quota exceeded|LimitExceeded|ResourceQuotaExceeded)",
+        "description": "Cloud or cluster resource limits exhausted. Insufficient compute, storage, or IP address capacity in the target environment.",
+        "confidence": "high",
+        "category": "resource_exhaustion",
+        "examples": [
+          "InsufficientInstanceCapacity: We currently do not have sufficient capacity in the Availability Zone",
+          "quota exceeded: pods",
+          "LimitExceeded: Cannot create more than N instances"
+        ]
+      },
+      {
+        "id": "env_dns_resolution",
+        "pattern": "(no such host|could not resolve host|Name or service not known|NXDOMAIN|DNS lookup failed)",
+        "description": "DNS resolution failure. The target hostname cannot be resolved, indicating DNS infrastructure problems or a hostname that doesn't exist yet.",
+        "confidence": "high",
+        "category": "connectivity",
+        "examples": [
+          "dial tcp: lookup rancher.example.com: no such host",
+          "could not resolve host: rancher.local",
+          "Name or service not known"
+        ]
+      },
+      {
+        "id": "env_tls_certificate",
+        "pattern": "(x509: certificate|certificate signed by unknown authority|certificate has expired|tls: handshake failure|certificate is not valid)",
+        "description": "TLS certificate validation failure. Can indicate expired certificates, self-signed certs not trusted, or infrastructure PKI issues.",
+        "confidence": "medium",
+        "category": "tls",
+        "examples": [
+          "x509: certificate signed by unknown authority",
+          "x509: certificate has expired or is not yet valid",
+          "tls: handshake failure"
+        ]
+      },
+      {
+        "id": "env_ssh_failure",
+        "pattern": "(ssh: handshake failed|ssh: unable to authenticate|SSH connection failed|Could not SSH into worker node)",
+        "description": "SSH connection failure to cluster nodes. Indicates key distribution issues, security group misconfigurations, or nodes not ready.",
+        "confidence": "high",
+        "category": "connectivity",
+        "examples": [
+          "ssh: handshake failed: ssh: unable to authenticate",
+          "Could not SSH into worker node machine-xyz, skipping"
+        ]
+      },
+      {
+        "id": "env_etcd_failure",
+        "pattern": "(etcdserver: leader changed|etcdserver: request timed out|etcd cluster is unavailable|etcdserver: too many requests)",
+        "description": "etcd cluster instability. The underlying etcd cluster backing Kubernetes is experiencing leadership changes, timeouts, or overload.",
+        "confidence": "high",
+        "category": "infrastructure",
+        "examples": [
+          "etcdserver: leader changed",
+          "etcdserver: request timed out",
+          "etcd cluster is unavailable or misconfigured"
+        ]
+      },
+      {
+        "id": "env_node_not_ready",
+        "pattern": "(NodeNotReady|node .* not ready|NotReady|ConditionFalse.*Ready)",
+        "description": "Kubernetes node is not in Ready state. The underlying VM/instance may be unhealthy, kubelet may have crashed, or network partition occurred.",
+        "confidence": "medium",
+        "category": "infrastructure",
+        "examples": [
+          "node worker-1 not ready",
+          "NodeNotReady: Node is not ready",
+          "condition Ready is ConditionFalse"
+        ]
+      },
+      {
+        "id": "env_image_pull",
+        "pattern": "(ImagePullBackOff|ErrImagePull|Failed to pull image|manifest unknown|repository does not exist)",
+        "description": "Container image pull failure. Registry may be unreachable, image tag may not exist, or registry authentication may be misconfigured.",
+        "confidence": "medium",
+        "category": "infrastructure",
+        "examples": [
+          "Failed to pull image \"rancher/rancher:v2.9.0\": rpc error: code = Unknown desc = Error response from daemon: manifest unknown",
+          "ErrImagePull: failed to pull and unpack image",
+          "ImagePullBackOff: Back-off pulling image"
+        ]
+      },
+      {
+        "id": "env_server_unavailable",
+        "pattern": "(502 Bad Gateway|503 Service Unavailable|504 Gateway Timeout|the server is currently unable to handle the request)",
+        "description": "Backend server or load balancer unavailability. Rancher or downstream cluster API servers may be overloaded, restarting, or unreachable.",
+        "confidence": "high",
+        "category": "infrastructure",
+        "examples": [
+          "502 Bad Gateway",
+          "503 Service Unavailable",
+          "504 Gateway Timeout",
+          "the server is currently unable to handle the request"
+        ]
+      },
+      {
+        "id": "env_api_server_not_ready",
+        "pattern": "(API server not ready|apiserver not ready|Unable to connect to the server|was refused|EOF)",
+        "description": "Kubernetes API server not responding. Can occur during cluster provisioning, upgrades, or when the control plane is unstable.",
+        "confidence": "medium",
+        "category": "infrastructure",
+        "examples": [
+          "API server not ready after 5m0s",
+          "Unable to connect to the server: EOF",
+          "the connection to the server was refused"
+        ]
+      }
+    ],
+    "test_defect_indicators": [
+      {
+        "id": "test_nil_pointer",
+        "pattern": "(runtime error: invalid memory address|nil pointer dereference|panic: runtime error)",
+        "description": "Nil pointer dereference in test code. The test is accessing a nil value, usually indicating missing nil-checks in test setup or assertions.",
+        "confidence": "high",
+        "examples": [
+          "panic: runtime error: invalid memory address or nil pointer dereference",
+          "goroutine 1 [running]: testing.tRunner"
+        ]
+      },
+      {
+        "id": "test_index_out_of_range",
+        "pattern": "(index out of range|slice bounds out of range|runtime error: index)",
+        "description": "Array/slice index out of bounds in test code. Test assumes a certain number of elements in a response but the product returned fewer.",
+        "confidence": "medium",
+        "examples": [
+          "runtime error: index out of range [0] with length 0",
+          "runtime error: slice bounds out of range [:3] with length 1"
+        ]
+      },
+      {
+        "id": "test_provider_not_found",
+        "pattern": "(Provider:.* not found|Node Provider:.* not found|Cluster type not found)",
+        "description": "Test references a provisioning provider, node provider, or cluster type that isn't configured. Test config or test code needs updating.",
+        "confidence": "high",
+        "examples": [
+          "Provider:vsphere not found",
+          "Node Provider:linode not found",
+          "panic: Cluster type not found"
+        ]
+      },
+      {
+        "id": "test_schema_not_found",
+        "pattern": "(unable to find test case|test case .* not found in project|test suite .* not found in project)",
+        "description": "Test case or suite not found in Qase. The schema YAML doesn't match actual test names, or a new test was added without a corresponding Qase schema entry.",
+        "confidence": "high",
+        "examples": [
+          "unable to find test case TestNewFeature",
+          "test suite \"Provisioning/RKE2\" not found in project RM"
+        ]
+      },
+      {
+        "id": "test_compilation_error",
+        "pattern": "(build constraints exclude all Go files|cannot find package|undefined:|syntax error|imported and not used)",
+        "description": "Go compilation error. Test code has syntax errors, missing imports, undefined references, or build tag mismatches preventing compilation.",
+        "confidence": "high",
+        "examples": [
+          "build constraints exclude all Go files in /path/to/package",
+          "undefined: SomeFunction",
+          "cannot find package \"github.com/rancher/tests/actions/missing\""
+        ]
+      },
+      {
+        "id": "test_assertion_mismatch",
+        "pattern": "(Not equal:|Expected.*Got|assert\\..*failed|expected.*to contain|expected.*but got)",
+        "description": "Test assertion produced a mismatch that may indicate the test expectation is outdated following an intentional product change. Requires comparison with recent product PRs.",
+        "confidence": "low",
+        "examples": [
+          "Not equal: expected: \"active\" got: \"updating\"",
+          "Expected [admin cluster-owner] to contain [restricted-admin]"
+        ]
+      },
+      {
+        "id": "test_skip_missing_config",
+        "pattern": "(No machine pools provided|No windows image provided|requires access to vsphere|requires access to aws|Cluster name to install should be set)",
+        "description": "Test skipped or failed due to missing test configuration. The CI job did not provide required environment variables or cattle config entries for this test.",
+        "confidence": "high",
+        "examples": [
+          "No machine pools provided",
+          "No windows image provided",
+          "Windows test requires access to vsphere",
+          "Cluster name to install should be set"
+        ]
+      }
+    ],
+    "product_defect_indicators": [
+      {
+        "id": "product_unexpected_state",
+        "pattern": "(cluster .* state.*error|State: error|Conditions.*False.*Reason|cluster is in error state)",
+        "description": "Cluster reached an error state during provisioning, upgrade, or normal operation. The Rancher controller failed to reconcile the cluster to the desired state.",
+        "confidence": "medium",
+        "examples": [
+          "Timeout report State: error, Conditions [{Type:Ready Status:False}]",
+          "cluster is in error state after provisioning"
+        ]
+      },
+      {
+        "id": "product_webhook_rejection",
+        "pattern": "(admission webhook .* denied|webhook .* rejected|validating-webhook|mutating-webhook.*error)",
+        "description": "Kubernetes admission webhook rejected a request that should have been allowed, or failed unexpectedly. May indicate a regression in Rancher's webhook validation logic.",
+        "confidence": "medium",
+        "examples": [
+          "admission webhook \"rancher.cattle.io\" denied the request: updates to builtIn GlobalRoles are forbidden",
+          "Error from server: admission webhook denied the request"
+        ]
+      },
+      {
+        "id": "product_api_error_unexpected",
+        "pattern": "(Bad response statusCode \\[500\\]|500 Internal Server Error|unexpected status code 500|internal error)",
+        "description": "Rancher API returned a 500 Internal Server Error. Indicates an unhandled exception or panic in the Rancher server code.",
+        "confidence": "high",
+        "examples": [
+          "Bad response statusCode [500]. Status [500 Internal Server Error]",
+          "unexpected status code 500: Internal Server Error"
+        ]
+      },
+      {
+        "id": "product_rbac_violation",
+        "pattern": "(403 Forbidden.*unexpected|should have access but got 403|permission denied.*unexpected|User .* is (not )?able to .* (but should|but should not))",
+        "description": "RBAC permission check failed contrary to expected behavior. A user was denied access they should have, or granted access they shouldn't have.",
+        "confidence": "medium",
+        "examples": [
+          "403 Forbidden: user standard-user should have access to list pods",
+          "User cluster-owner is not able to create namespaces but should be able to"
+        ]
+      },
+      {
+        "id": "product_resource_not_created",
+        "pattern": "(failed to create|was not created|resource .* not found after creation|object has been deleted|not found.*after provisioning)",
+        "description": "A resource that Rancher should have created was not found. Indicates controller logic failure, race condition, or regression in resource creation flow.",
+        "confidence": "medium",
+        "examples": [
+          "failed to create test case: ClusterRoleTemplateBinding",
+          "resource fleet-default/cluster-xyz not found after creation",
+          "cluster-registration-token not found after provisioning"
+        ]
+      },
+      {
+        "id": "product_encryption_rotation_failure",
+        "pattern": "(encryption key rotation failed|failed waiting to reach|EncryptionKeyRotation)",
+        "description": "Encryption key rotation process failed. A specific Rancher feature that rotates etcd encryption keys did not complete successfully.",
+        "confidence": "high",
+        "examples": [
+          "Encryption key rotation failed waiting to reach phase Reencrypt",
+          "encryption key rotation failed"
+        ]
+      },
+      {
+        "id": "product_version_mismatch",
+        "pattern": "(version mismatch|unsupported.*version|KubernetesVersion.*does not match|incompatible.*version)",
+        "description": "A version mismatch was detected between expected and actual Kubernetes or Rancher versions. Could indicate KDM update issues or upgrade path problems.",
+        "confidence": "medium",
+        "examples": [
+          "KubernetesVersion v1.28.5+rke2r1 does not match expected v1.29.0+rke2r1",
+          "unsupported Kubernetes version for this Rancher release"
+        ]
+      }
+    ]
+  },
+  "decision_tree": {
+    "step_1": {
+      "question": "Is the failure a Go compilation/build error (build constraints, undefined symbols, syntax errors)?",
+      "check": "Match error output against test_defect_indicators: test_compilation_error, test_provider_not_found",
+      "yes": "CLASSIFY: test_defect (confidence: high). Action: Fix the test code compilation issue.",
+      "no": "Go to step_2"
+    },
+    "step_2": {
+      "question": "Does the error output match any config/environment indicator (timeouts, DNS, TLS, SSH, cloud rate limits, resource exhaustion)?",
+      "check": "Match error output against all config_environment_indicators patterns",
+      "yes": "Go to step_3 (confirm environment classification)",
+      "no": "Go to step_4"
+    },
+    "step_3": {
+      "question": "Is the same infrastructure failure pattern seen across multiple unrelated tests in this run?",
+      "check": "Count distinct tests with the same config_environment_indicator category. If >= 2 unrelated test suites have the same pattern, it is systemic.",
+      "yes": "CLASSIFY: config_environment (confidence: high). Action: The infrastructure is degraded. Rerun after infra remediation.",
+      "no": "Go to step_3a"
+    },
+    "step_3a": {
+      "question": "Did this specific test pass in the previous run on the same infrastructure?",
+      "check": "Query Qase historical results for this test case in the same project. Compare last N results.",
+      "yes": "CLASSIFY: config_environment (confidence: medium). Action: Likely a transient infrastructure issue. Rerun the test.",
+      "no": "Go to step_4 (the failure may be deeper than infra)"
+    },
+    "step_4": {
+      "question": "Does the error output contain a nil pointer dereference, index out of range, or Go panic originating from the test package (not from rancher/ source)?",
+      "check": "Match against test_defect_indicators: test_nil_pointer, test_index_out_of_range. Check if the panic stack trace references rancher-tests/ (test code) vs rancher/ (product code).",
+      "yes_test_code": "CLASSIFY: test_defect (confidence: high). Action: Fix nil-check or bounds-check in test code.",
+      "yes_product_code": "CLASSIFY: product_defect (confidence: high). Action: Open a product bug for the panic.",
+      "no": "Go to step_5"
+    },
+    "step_5": {
+      "question": "Does the error match a product defect indicator (500 errors, unexpected RBAC behavior, webhook rejections, failed resource creation, unexpected cluster state)?",
+      "check": "Match error output against all product_defect_indicators patterns",
+      "yes": "Go to step_6 (confirm product defect vs. intentional change)",
+      "no": "Go to step_7"
+    },
+    "step_6": {
+      "question": "Was there a recent product change (PR merged in the last 7 days) that could explain the behavioral difference?",
+      "check": "Cross-reference the test's area (RBAC, provisioning, charts, etc.) against recent PRs to rancher/rancher. Check release notes and changelog.",
+      "yes_intentional": "CLASSIFY: test_defect (confidence: medium). Action: Update the test to match the new intentional product behavior.",
+      "yes_regression": "CLASSIFY: product_defect (confidence: high). Action: Open a product bug referencing the suspected regressing PR.",
+      "no": "CLASSIFY: product_defect (confidence: medium). Action: Open a product bug and attach the full test output."
+    },
+    "step_7": {
+      "question": "Is this test in the flaky test detection window (pass rate between 30% and 70% over the last 10 runs)?",
+      "check": "Query Qase for the last 10 results of this test case. Calculate pass rate.",
+      "yes_flaky": "CLASSIFY: flaky_test (confidence: medium). Action: Mark as flaky in Qase (is_flaky=1). Investigate root cause as a test_defect or intermittent product_defect.",
+      "yes_broken": "CLASSIFY: test_defect (confidence: high) if pass rate < 30%. The test is consistently broken and needs investigation.",
+      "no": "Go to step_8"
+    },
+    "step_8": {
+      "question": "Does the test have missing configuration or skip conditions that weren't triggered (e.g., missing machine pools, missing cloud provider access)?",
+      "check": "Match against test_defect_indicators: test_skip_missing_config. Check if required env vars (cattle config, cloud credentials) are set for this test's build tags.",
+      "yes": "CLASSIFY: config_environment (confidence: high). Action: The CI job configuration is incomplete for this test. Fix Jenkins job parameters.",
+      "no": "CLASSIFY: unknown (confidence: low). Action: Manual triage required. Escalate to QA team with full test output, Rancher version, K8s version, and infrastructure details."
+    }
+  },
+  "environment_failure_patterns": {
+    "timeout": {
+      "patterns": [
+        "context deadline exceeded",
+        "i/o timeout",
+        "connection refused",
+        "timed out waiting",
+        "Client.Timeout exceeded",
+        "DeadlineExceeded",
+        "context canceled",
+        "request timeout",
+        "API server not ready after"
+      ],
+      "likely_cause": "Infrastructure timeout or networking issue. The target service did not respond within the configured timeout window.",
+      "action": "CHECK_INFRA_FIRST",
+      "remediation": "1. Verify cluster health (kubectl get nodes, kubectl get cs). 2. Check network connectivity between test runner and cluster. 3. Review cloud provider status page. 4. If transient, rerun the test."
+    },
+    "cloud_provider_rate_limit": {
+      "patterns": [
+        "ThrottlingException",
+        "RequestLimitExceeded",
+        "Rate exceeded",
+        "Too Many Requests",
+        "429",
+        "Throttling",
+        "SlowDown",
+        "TooManyRequestsException"
+      ],
+      "likely_cause": "Cloud provider rate limiting. Concurrent CI jobs or burst API usage exceeded the provider's request rate limits.",
+      "action": "RERUN_WITH_BACKOFF",
+      "remediation": "1. Stagger CI job execution. 2. Implement exponential backoff (already present in reporter). 3. Request rate limit increases from cloud provider if recurring."
+    },
+    "resource_exhaustion": {
+      "patterns": [
+        "insufficient capacity",
+        "InsufficientInstanceCapacity",
+        "quota exceeded",
+        "LimitExceeded",
+        "ResourceQuotaExceeded",
+        "exceeded quota",
+        "vCPU limit",
+        "address space exhausted",
+        "no available addresses"
+      ],
+      "likely_cause": "Cloud resource limits reached. The account or region has hit compute, storage, networking, or IP address quotas.",
+      "action": "CHECK_QUOTAS",
+      "remediation": "1. Run 'aws service-quotas list-service-quotas' or equivalent. 2. Clean up stale resources from previous test runs. 3. Request quota increases."
+    },
+    "version_mismatch": {
+      "patterns": [
+        "unsupported version",
+        "version mismatch",
+        "incompatible",
+        "unsupported Kubernetes version",
+        "not supported on this version",
+        "build constraints exclude all Go files"
+      ],
+      "likely_cause": "Wrong K8s/Rancher version for this test. The test requires a specific version that doesn't match what's deployed, or build tags exclude this test for the current version.",
+      "action": "CHECK_BUILD_TAGS",
+      "remediation": "1. Verify the Rancher version matches the test's go:build tag constraints (e.g., !2.8, !2.9). 2. Check KDM data for supported K8s versions. 3. Update Jenkins job parameters."
+    },
+    "authentication_failure": {
+      "patterns": [
+        "401 Unauthorized",
+        "unauthorized",
+        "authentication required",
+        "invalid token",
+        "token expired",
+        "login failed"
+      ],
+      "likely_cause": "Authentication credentials expired or invalid. The Rancher API token or kubeconfig used by the test runner may have expired.",
+      "action": "CHECK_AUTH",
+      "remediation": "1. Verify CATTLE_TEST_CONFIG contains valid admin token. 2. Check if the Rancher server's auth provider is functioning. 3. Regenerate API tokens if expired."
+    },
+    "registry_failure": {
+      "patterns": [
+        "ImagePullBackOff",
+        "ErrImagePull",
+        "Failed to pull image",
+        "manifest unknown",
+        "repository does not exist",
+        "unauthorized to access repository",
+        "toomanyrequests: You have reached your pull rate limit"
+      ],
+      "likely_cause": "Container registry unavailability or authentication failure. Docker Hub rate limits, private registry credentials, or image not published yet.",
+      "action": "CHECK_REGISTRY",
+      "remediation": "1. Verify registry credentials in the cluster. 2. Check Docker Hub rate limit status. 3. Confirm the image tag exists in the registry. 4. For airgap tests, verify the private registry is populated."
+    }
+  },
+  "flaky_test_detection": {
+    "method": "historical_pass_rate",
+    "threshold_flaky": 0.7,
+    "threshold_broken": 0.3,
+    "window_size": 10,
+    "description": "Analyze the last N test results for a given test case in Qase. If a test passes <30% of the time, it is classified as 'broken'. Between 30-70% is 'flaky'. >70% pass rate and the current failure is likely an environment issue or new regression.",
+    "qql_query_template": "entity = \"result\" and project = \"{project}\" and case = {case_id} and created >= now(\"-30d\")",
+    "classification": {
+      "pass_rate_below_30": {
+        "label": "broken",
+        "action": "Investigate as test_defect. The test is failing consistently and should be fixed or disabled.",
+        "qase_action": "Mark is_flaky=0, add tag 'broken'. Open a test defect."
+      },
+      "pass_rate_30_to_70": {
+        "label": "flaky",
+        "action": "Mark as flaky in Qase. Investigate timing dependencies, race conditions, or environmental sensitivity.",
+        "qase_action": "Mark is_flaky=1, add tag 'flaky'. Create investigation ticket."
+      },
+      "pass_rate_above_70_current_fail": {
+        "label": "likely_environment_or_regression",
+        "action": "If this is a new failure on a normally-passing test, treat as potential regression or transient environment issue. Check recent product changes first.",
+        "qase_action": "Do not mark flaky. Investigate as potential product_defect or config_environment."
+      }
+    }
+  },
+  "build_tag_mapping": {
+    "description": "Maps Go build tags to test categories and infrastructure requirements. Used to validate that the CI job configuration matches the test's requirements.",
+    "tags": {
+      "validation": {
+        "description": "Full validation test suite",
+        "infrastructure": "Requires Rancher server + at least one downstream cluster"
+      },
+      "sanity": {
+        "description": "Quick sanity checks that can run on minimal infrastructure",
+        "infrastructure": "Requires Rancher server + one downstream cluster"
+      },
+      "extended": {
+        "description": "Extended test scenarios covering edge cases",
+        "infrastructure": "Requires Rancher server + downstream clusters with specific configurations"
+      },
+      "stress": {
+        "description": "Stress and load testing scenarios",
+        "infrastructure": "Requires dedicated high-resource infrastructure"
+      },
+      "pit.daily": {
+        "description": "Product Integration Tests run daily",
+        "infrastructure": "Automated CI environment"
+      },
+      "pit.weekly": {
+        "description": "Product Integration Tests run weekly",
+        "infrastructure": "Automated CI environment with extended resources"
+      },
+      "recurring": {
+        "description": "Recurring infrastructure tests (provisioning, upgrades, snapshots)",
+        "infrastructure": "Requires full cloud provider access"
+      },
+      "infra.any": {
+        "description": "Can run on any infrastructure type",
+        "infrastructure": "No specific infrastructure requirements beyond a Rancher server"
+      },
+      "infra.rke2k3s": {
+        "description": "Requires RKE2 or K3s downstream clusters",
+        "infrastructure": "RKE2/K3s clusters provisioned on supported cloud providers"
+      },
+      "infra.aks": {
+        "description": "Requires Azure AKS clusters",
+        "infrastructure": "Azure credentials and AKS cluster access"
+      },
+      "infra.eks": {
+        "description": "Requires AWS EKS clusters",
+        "infrastructure": "AWS credentials and EKS cluster access"
+      },
+      "infra.gke": {
+        "description": "Requires GCP GKE clusters",
+        "infrastructure": "GCP credentials and GKE cluster access"
+      }
+    }
+  },
+  "triage_prompts": {
+    "product_defect": {
+      "model": "Claude Sonnet 4.6",
+      "system_prompt": "You are a Senior QA Engineer triaging a Rancher product test failure. Your job is to determine if this failure represents a genuine product defect in Rancher. Analyze the test output, error messages, stack traces, and test code to classify the failure. Consider recent product changes (PRs merged to rancher/rancher), the Rancher version under test, the Kubernetes version, and the infrastructure configuration. Be precise: distinguish between product bugs (Rancher behaving incorrectly), test bugs (test code is wrong), and environment issues (infra problems). Provide specific evidence for your classification.",
+      "required_context": [
+        "test_code",
+        "error_output",
+        "stack_trace",
+        "rancher_version",
+        "k8s_version",
+        "recent_product_changes",
+        "test_build_tags",
+        "infrastructure_type"
+      ],
+      "output_format": {
+        "classification": "product_defect | test_defect | config_environment | unknown",
+        "confidence": "high | medium | low",
+        "evidence": "Specific error messages, code paths, and reasoning supporting the classification",
+        "suspected_component": "The Rancher component likely at fault (e.g., provisioning, RBAC, webhook, fleet, UI)",
+        "recommended_action": "Open product bug | Fix test | Rerun after infra fix | Manual investigation",
+        "related_github_issues": "Links to potentially related existing issues"
+      }
+    },
+    "test_defect": {
+      "model": "Claude Haiku 3.5",
+      "system_prompt": "You are a QA engineer reviewing a test failure to determine if the test code itself is the problem. Look for nil pointer dereferences in test code, incorrect assertions that don't match current product behavior, missing test setup, hardcoded values that may have changed, missing error handling, and race conditions in test logic. If the test expectation is wrong because the product intentionally changed behavior, classify as test_defect. Provide a concise fix recommendation.",
+      "required_context": [
+        "test_code",
+        "error_output",
+        "recent_test_changes",
+        "qase_test_schema"
+      ],
+      "output_format": {
+        "classification": "test_defect | not_test_defect",
+        "confidence": "high | medium | low",
+        "evidence": "Specific line numbers and code patterns that indicate the test is at fault",
+        "fix_recommendation": "Concrete code change suggestion",
+        "estimated_effort": "trivial | small | medium | large"
+      }
+    },
+    "environment_triage": {
+      "model": "Claude Haiku 3.5",
+      "system_prompt": "You are an infrastructure engineer reviewing a test failure to determine if the root cause is an environment or configuration issue. Look for timeout patterns, DNS failures, TLS errors, cloud provider rate limits, resource exhaustion, SSH failures, and node health problems. Correlate with the infrastructure tags used in the test (infra.aks, infra.eks, infra.gke, infra.rke2k3s) to determine if the infrastructure type matches what's available.",
+      "required_context": [
+        "error_output",
+        "infrastructure_type",
+        "cloud_provider",
+        "build_tags",
+        "jenkins_job_config"
+      ],
+      "output_format": {
+        "classification": "config_environment | not_environment",
+        "confidence": "high | medium | low",
+        "evidence": "Specific infrastructure error patterns found",
+        "root_cause_category": "timeout | connectivity | resource_exhaustion | rate_limit | version_mismatch | authentication | registry",
+        "recommended_action": "Specific remediation steps"
+      }
+    }
+  },
+  "timeout_failure_handling": {
+    "description": "Special handling for gotestsum timeout failures. When the overall Go test binary times out (default 10m), gotestsum emits a fail action with an empty Test field. The reporter code marks all in-progress tests as failed. These are almost always config/environment issues.",
+    "detection": {
+      "gotestsum_pattern": "Action='fail' with Test='' (empty string)",
+      "reporter_code_reference": "validation/pipeline/qase/reporter/main.go:233-234 and reporter-v2/main.go:177-178",
+      "behavior": "All tests that were still running (status='') when the timeout occurred get marked as 'fail'"
+    },
+    "classification": "config_environment",
+    "confidence": "high",
+    "action": "Increase Go test timeout (-timeout flag) or investigate why tests are running longer than expected. Check for infrastructure slowness."
+  },
+  "qase_integration": {
+    "description": "How triage results map to Qase entities and actions.",
+    "defect_creation": {
+      "product_defect": {
+        "entity": "defect",
+        "project": "RM",
+        "severity_mapping": {
+          "high_confidence": "critical",
+          "medium_confidence": "major",
+          "low_confidence": "normal"
+        },
+        "tags": ["auto-triaged", "product-defect"],
+        "attach_to_case": true
+      },
+      "test_defect": {
+        "entity": "defect",
+        "project": "RM",
+        "severity_mapping": {
+          "high_confidence": "major",
+          "medium_confidence": "normal",
+          "low_confidence": "minor"
+        },
+        "tags": ["auto-triaged", "test-defect"],
+        "attach_to_case": true
+      },
+      "config_environment": {
+        "entity": "none",
+        "action": "Add comment to test result in Qase with the environment failure pattern and remediation steps. Do not create a defect.",
+        "tags": ["auto-triaged", "environment-issue"]
+      }
+    },
+    "result_annotation": {
+      "comment_template": "[Auto-Triage] Classification: {classification} | Confidence: {confidence} | Pattern: {matched_pattern} | Evidence: {evidence} | Recommended Action: {action}"
+    }
+  }
+}

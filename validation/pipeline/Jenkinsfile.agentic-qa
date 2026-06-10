@@ -9,30 +9,38 @@
  * ──────────────────────────────────────────────────────────────────
  * PARAMETER OWNERSHIP
  * ──────────────────────────────────────────────────────────────────
- * ALL parameters are defined exclusively jenkins-job-builder. This file 
- * contains NO parameters{} block. Jenkins reads parameter definitions 
- * from the generated job config; this script reads them via params.<NAME> 
- * as usual.
+ * ALL parameters are defined exclusively in qa-agentic-qa-pipeline.yml
+ * (jenkins-job-builder). This file contains NO parameters{} block.
  *
  * TRIGGER: MANUAL ONLY — use "Build with Parameters" in the Jenkins UI.
  *
  * ──────────────────────────────────────────────────────────────────
- * RUNTIME
+ * CONTAINER BUILD PATTERN
  * ──────────────────────────────────────────────────────────────────
- * The pipeline runs inside a container built from Dockerfile.agentic-qa.
- * That image contains a single Go binary (`agentic-qa`) with cobra
- * subcommands for each pipeline step, plus bash/curl/git/jq/kubectl.
- * No Python, no Node.js, no pip install.
+ * Matches the pattern used by Jenkinsfile.individual.e2e:
+ *   1. Checkout — GitSCM with CleanCheckout extension
+ *   2. Build Image — `docker build` from Dockerfile.agentic-qa
+ *   3. Run steps — `docker run --rm --env-file ...` per stage
+ *   4. Cleanup — `docker rmi -f` in post { always }
  *
  * ──────────────────────────────────────────────────────────────────
- * SECURITY DESIGN
+ * CREDENTIAL HANDLING
  * ──────────────────────────────────────────────────────────────────
- * 1. INPUT VALIDATION — every user-supplied string is validated against
- *    a strict allowlist regex before touching any shell.
- * 2. NO GROOVY INTERPOLATION IN sh() — all sh() blocks are single-
- *    quoted; validated values reach the shell only via env vars.
- * 3. ADDITIONAL_CONTEXT FILE STAGING — freeform TEXT is written to a
- *    workspace file by Groovy, never as a shell argument.
+ * Text credentials are written to an env file (.agentic_env) that is
+ * passed to every `docker run` invocation via --env-file.
+ * The Google SA JSON file (GOOGLE_APPLICATION_CREDENTIALS) is mounted
+ * into the container at /run/google_creds.json.
+ * Neither the env file nor the credential paths are shell-interpolated
+ * into command arguments; they are written by Groovy and referenced
+ * by fixed workspace-relative paths.
+ *
+ * ──────────────────────────────────────────────────────────────────
+ * SHELL INJECTION HARDENING
+ * ──────────────────────────────────────────────────────────────────
+ * All user-supplied string parameters are validated against strict
+ * allowlist regexes before being written to the env file or used in
+ * any shell call. The env file approach keeps secrets out of process
+ * arguments entirely (not visible in `ps` output).
  *
  * Required Credentials (Jenkins Credential Store):
  *   github-api-token        Secret text — GitHub PAT
@@ -43,32 +51,13 @@
  *   github-mcp-token        Secret text — GitHub MCP token (optional)
  */
 
-// ── Validated env var names — only these appear in sh() blocks ────
-@groovy.transform.Field static final String VE_PR_NUMBER       = 'VE_PR_NUMBER'
-@groovy.transform.Field static final String VE_REPO            = 'VE_REPO'
-@groovy.transform.Field static final String VE_PROVIDER        = 'VE_PROVIDER'
-@groovy.transform.Field static final String VE_VERTEX_PROJECT  = 'VE_VERTEX_PROJECT'
-@groovy.transform.Field static final String VE_VERTEX_LOCATION = 'VE_VERTEX_LOCATION'
-@groovy.transform.Field static final String VE_SONNET_MODEL    = 'VE_SONNET_MODEL'
-@groovy.transform.Field static final String VE_HAIKU_MODEL     = 'VE_HAIKU_MODEL'
-@groovy.transform.Field static final String VE_QASE_PROJECT    = 'VE_QASE_PROJECT'
-@groovy.transform.Field static final String VE_QASE_RUN_NAME   = 'VE_QASE_RUN_NAME'
-@groovy.transform.Field static final String VE_MCP_URL         = 'VE_MCP_URL'
-@groovy.transform.Field static final String VE_TEST_TIMEOUT    = 'VE_TEST_TIMEOUT'
-@groovy.transform.Field static final String VE_MAX_RERUNS      = 'VE_MAX_RERUNS'
-@groovy.transform.Field static final String VE_CONTEXT_FILE    = 'VE_CONTEXT_FILE'
-@groovy.transform.Field static final String VE_AUTO_TRIGGER    = 'VE_AUTO_TRIGGER'
-@groovy.transform.Field static final String VE_AUTO_ISSUES     = 'VE_AUTO_ISSUES'
-@groovy.transform.Field static final String VE_AUTO_PRS        = 'VE_AUTO_PRS'
-@groovy.transform.Field static final String VE_USE_COPILOT     = 'VE_USE_COPILOT'
-@groovy.transform.Field static final String VE_DRY_RUN         = 'VE_DRY_RUN'
-@groovy.transform.Field static final String VE_CLEANUP_MODE    = 'VE_CLEANUP_MODE'
-
-// ── Allowlist patterns ────────────────────────────────────────────
+// ── Allowlist patterns — validated before touching any shell ──────
 @groovy.transform.Field
 static final Map<String, java.util.regex.Pattern> PAT = [
     PR_NUMBER:     ~/^\d{1,10}$/,
     REPO:          ~/^[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}$/,
+    HTTPS_GIT_URL: ~/^https:\/\/github\.com\/[A-Za-z0-9_.-]{1,100}\/[A-Za-z0-9_.-]{1,100}(\.git)?$/,
+    GIT_BRANCH:    ~/^[A-Za-z0-9][A-Za-z0-9_.\/\-]{0,100}$/,
     MODEL_ID:      ~/^claude-[a-z0-9\-]{2,60}$/,
     GCP_PROJECT:   ~/^[a-z][a-z0-9\-]{4,28}[a-z0-9]$/,
     GCP_LOCATION:  ~/^[a-z]{2,20}(-[a-z]{2,20}[0-9]?)?$/,
@@ -79,185 +68,280 @@ static final Map<String, java.util.regex.Pattern> PAT = [
     MCP_URL:       ~/^https?:\/\/[A-Za-z0-9_.\-]+(:\d{1,5})?\/(mcp|sse)$/,
 ]
 
+// Unique image name for this build — avoids conflicts on shared nodes
+@groovy.transform.Field
+static final String IMAGE_BASE = 'rancher-agentic-qa'
+
+def AGENTIC_IMAGE = ''
 def PIPELINE_RESULT = [:]
 
-// ── Shared persistent flags for every agentic-qa subcommand ──────
-// Built once in Setup, reused by every stage.
-def CLI_GLOBAL_FLAGS = ''
+// ── Fixed workspace-relative paths (never user-controlled) ────────
+def ENV_FILE     = '.agentic_env'          // docker --env-file
+def GCP_CREDS    = '.google_creds.json'    // SA key copy in workspace
+def CTX_FILE     = '.agentic_context.txt'  // ADDITIONAL_CONTEXT staging
+def STATE_FILE   = 'pipeline_state.json'   // resource tracking for cleanup
 
 pipeline {
-    agent {
-        kubernetes {
-            inheritFrom 'default'
-            yaml '''
-apiVersion: v1
-kind: Pod
-spec:
-  containers:
-  - name: agentic-qa
-    # Build from Dockerfile.agentic-qa or use pre-pushed image:
-    #   ghcr.io/rancher/agentic-qa:latest
-    # For now, reference a pre-built image. In production, use the
-    # Dockerfile.agentic-qa multi-stage build pushed to a registry.
-    image: ghcr.io/rancher/agentic-qa:latest
-    command: [cat]
-    tty: true
-    resources:
-      requests:
-        memory: "1Gi"
-        cpu: "500m"
-      limits:
-        memory: "2Gi"
-        cpu: "1"
-    securityContext:
-      allowPrivilegeEscalation: false
-      capabilities:
-        drop: [ALL]
-'''
-        }
-    }
+    // Same agent type as Jenkinsfile.individual.e2e — any Docker-capable node.
+    agent any
 
     options {
-        timeout(time: 8, unit: 'HOURS')
+        timeout(time: 2, unit: 'HOURS')
         timestamps()
         ansiColor('xterm')
-        buildDiscarder(logRotator(numToKeepStr: '100'))
+        buildDiscarder(logRotator(numToKeepStr: '30'))
         disableConcurrentBuilds()
     }
 
-    // NO parameters{} block — parameters defined in JJB YAML only.
-
-    environment {
-        GITHUB_TOKEN                   = credentials('github-api-token')
-        QASE_API_TOKEN                 = credentials('qase-api-token')
-        CLAUDE_API_KEY                 = credentials('claude-api-key')
-        GOOGLE_APPLICATION_CREDENTIALS = credentials('google-vertex-sa-key')
-        COPILOT_TOKEN                  = credentials('github-copilot-token')
-        GITHUB_MCP_TOKEN               = credentials('github-mcp-token')
-    }
+    // NO parameters{} block — defined solely in qa-agentic-qa-pipeline.yml.
 
     stages {
 
         ////////////////////////////////////////////////////////////////////////
-        // STAGE 0: SETUP & VALIDATION
+        // STAGE 0: CHECKOUT
+        // Explicit GitSCM checkout — matches Jenkinsfile.individual.e2e pattern.
+        // The pipeline-scm checkout delivers the Jenkinsfile; this checkout
+        // ensures the correct TESTS_BRANCH is present for the Docker build.
         ////////////////////////////////////////////////////////////////////////
-        stage('Setup') {
+        stage('Checkout') {
             steps {
-                container('agentic-qa') {
-                    script {
-                        // ── Validate all parameters ───────────────────────
-                        def prRaw = params.RANCHER_PR_NUMBER?.trim() ?: ''
-                        if (!prRaw.matches(PAT.PR_NUMBER))
-                            error("RANCHER_PR_NUMBER must be 1-10 digits. Got: '${prRaw.take(30)}'")
-                        env[VE_PR_NUMBER] = prRaw
+                script {
+                    // Validate SCM parameters before touching Git
+                    if (!params.TESTS_REPO_URL?.trim() ||
+                        !params.TESTS_REPO_URL.matches(PAT.HTTPS_GIT_URL))
+                        error("TESTS_REPO_URL must be an HTTPS GitHub URL. " +
+                              "Got: '${params.TESTS_REPO_URL?.take(80)}'")
 
-                        if (!params.RANCHER_REPO.matches(PAT.REPO))
-                            error("RANCHER_REPO must match owner/repo. Got: '${params.RANCHER_REPO.take(50)}'")
-                        env[VE_REPO] = params.RANCHER_REPO
+                    def branch = params.TESTS_BRANCH?.trim() ?: 'main'
+                    if (!branch.matches(PAT.GIT_BRANCH))
+                        error("TESTS_BRANCH contains invalid characters. " +
+                              "Got: '${branch.take(40)}'")
 
-                        env[VE_PROVIDER] = params.LLM_PROVIDER
+                    deleteDir()
+                    checkout([
+                        $class: 'GitSCM',
+                        branches: [[name: "*/${branch}"]],
+                        extensions: [[$class: 'CleanCheckout']],
+                        userRemoteConfigs: [[url: params.TESTS_REPO_URL]]
+                    ])
 
-                        if (params.LLM_PROVIDER == 'vertex-ai') {
-                            if (!params.VERTEX_PROJECT_ID?.trim())
-                                error('VERTEX_PROJECT_ID required for vertex-ai')
-                            if (!params.VERTEX_PROJECT_ID.matches(PAT.GCP_PROJECT))
-                                error("VERTEX_PROJECT_ID invalid. Got: '${params.VERTEX_PROJECT_ID.take(40)}'")
-                            if (!params.VERTEX_LOCATION.matches(PAT.GCP_LOCATION))
-                                error("VERTEX_LOCATION invalid. Got: '${params.VERTEX_LOCATION.take(40)}'")
-                        }
-                        env[VE_VERTEX_PROJECT]  = params.VERTEX_PROJECT_ID ?: ''
-                        env[VE_VERTEX_LOCATION] = params.VERTEX_LOCATION
-
-                        if (!params.SONNET_MODEL.matches(PAT.MODEL_ID))
-                            error("SONNET_MODEL invalid. Got: '${params.SONNET_MODEL.take(40)}'")
-                        if (!params.HAIKU_MODEL.matches(PAT.MODEL_ID))
-                            error("HAIKU_MODEL invalid. Got: '${params.HAIKU_MODEL.take(40)}'")
-                        env[VE_SONNET_MODEL] = params.SONNET_MODEL
-                        env[VE_HAIKU_MODEL]  = params.HAIKU_MODEL
-
-                        env[VE_QASE_PROJECT] = params.QASE_PROJECT
-
-                        def runName = params.QASE_TEST_RUN_NAME?.trim() ?: ''
-                        if (runName && !runName.matches(PAT.QASE_RUN_NAME))
-                            error('QASE_TEST_RUN_NAME has disallowed characters')
-                        env[VE_QASE_RUN_NAME] = runName ?:
-                            "Agentic QA - PR-${prRaw} - ${new Date().format('yyyy-MM-dd')}"
-
-                        def mcpUrl = params.QASE_MCP_SERVER_URL?.trim() ?: ''
-                        if (mcpUrl && !mcpUrl.matches(PAT.MCP_URL))
-                            error("QASE_MCP_SERVER_URL must be http(s)://host[:port]/(mcp|sse). Got: '${mcpUrl.take(100)}'")
-                        env[VE_MCP_URL] = mcpUrl
-
-                        if (!params.TEST_TIMEOUT.matches(PAT.TIMEOUT))
-                            error("TEST_TIMEOUT invalid. Got: '${params.TEST_TIMEOUT.take(20)}'")
-                        if (!params.MAX_RERUNS.matches(PAT.MAX_RERUNS))
-                            error("MAX_RERUNS must be 0-10. Got: '${params.MAX_RERUNS.take(5)}'")
-                        env[VE_TEST_TIMEOUT] = params.TEST_TIMEOUT
-                        env[VE_MAX_RERUNS]   = params.MAX_RERUNS
-
-                        env[VE_AUTO_TRIGGER]  = params.AUTO_TRIGGER_TESTS.toString()
-                        env[VE_AUTO_ISSUES]   = params.AUTO_CREATE_ISSUES.toString()
-                        env[VE_AUTO_PRS]      = params.AUTO_CREATE_PRS.toString()
-                        env[VE_USE_COPILOT]   = params.USE_COPILOT_FOR_FIXES.toString()
-                        env[VE_DRY_RUN]       = params.DRY_RUN.toString()
-                        env[VE_CLEANUP_MODE]  = params.CLEANUP_MODE.toString()
-
-                        // Stage ADDITIONAL_CONTEXT to file (never shell arg)
-                        def ctxFile = "${WORKSPACE}/.agentic_context.txt"
-                        writeFile file: ctxFile, text: params.ADDITIONAL_CONTEXT ?: ''
-                        env[VE_CONTEXT_FILE] = ctxFile
-
-                        // Initialize pipeline_state.json
-                        writeJSON file: "${WORKSPACE}/pipeline_state.json", json: [
-                            qase_runs: [], qase_defects: [],
-                            github_issues: [], github_prs: [],
-                        ]
-
-                        echo """=== Agentic QA Pipeline ===
-PR:        ${env[VE_REPO]}#${env[VE_PR_NUMBER]}
-Provider:  ${env[VE_PROVIDER]}
-Qase:      ${env[VE_QASE_PROJECT]}
-MCP:       ${env[VE_MCP_URL] ?: '(not configured)'}
-Dry run:   ${env[VE_DRY_RUN]}
-Cleanup:   ${env[VE_CLEANUP_MODE]}
-All inputs validated."""
-                    }
-
-                    // Validate credential connectivity
-                    sh '''
-                        agentic-qa validate \
-                            --provider       "$VE_PROVIDER"          \
-                            --vertex-project "$VE_VERTEX_PROJECT"    \
-                            --vertex-location "$VE_VERTEX_LOCATION"  \
-                            --qase-project   "$VE_QASE_PROJECT"
-                    '''
+                    echo "Checked out ${params.TESTS_REPO_URL} @ ${branch}"
                 }
             }
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 1: IDENTIFY TESTS                                [Haiku]
+        // STAGE 1: VALIDATE PARAMETERS & WRITE CREDENTIAL FILES
+        // Validates all user parameters with strict regex allowlists.
+        // Writes the env file and stages credentials — no shell interpolation.
+        ////////////////////////////////////////////////////////////////////////
+        stage('Setup') {
+            steps {
+                // Bind all credentials in a single withCredentials block.
+                // Text credentials → env vars written to .agentic_env.
+                // File credential → copied to workspace as .google_creds.json.
+                withCredentials([
+                    string(credentialsId: 'github-api-token',     variable: 'GITHUB_TOKEN'),
+                    string(credentialsId: 'qase-api-token',       variable: 'QASE_API_TOKEN'),
+                    string(credentialsId: 'claude-api-key',       variable: 'CLAUDE_API_KEY'),
+                    file(  credentialsId: 'google-vertex-sa-key', variable: 'GOOGLE_SA_FILE'),
+                    string(credentialsId: 'github-copilot-token', variable: 'COPILOT_TOKEN'),
+                    string(credentialsId: 'github-mcp-token',     variable: 'GITHUB_MCP_TOKEN'),
+                ]) {
+                    script {
+                        // ── Validate all parameters ───────────────────────────
+
+                        def prRaw = params.RANCHER_PR_NUMBER?.trim() ?: ''
+                        if (!prRaw.matches(PAT.PR_NUMBER))
+                            error("RANCHER_PR_NUMBER must be 1-10 digits. Got: '${prRaw.take(30)}'")
+
+                        if (!params.RANCHER_REPO.matches(PAT.REPO))
+                            error("RANCHER_REPO must match owner/repo. Got: '${params.RANCHER_REPO.take(50)}'")
+
+                        if (params.LLM_PROVIDER == 'vertex-ai') {
+                            if (!params.VERTEX_PROJECT_ID?.trim())
+                                error('VERTEX_PROJECT_ID is required when LLM_PROVIDER=vertex-ai')
+                            if (!params.VERTEX_PROJECT_ID.matches(PAT.GCP_PROJECT))
+                                error("VERTEX_PROJECT_ID invalid GCP project ID. Got: '${params.VERTEX_PROJECT_ID.take(40)}'")
+                            if (!params.VERTEX_LOCATION.matches(PAT.GCP_LOCATION))
+                                error("VERTEX_LOCATION invalid. Got: '${params.VERTEX_LOCATION.take(40)}'")
+                        }
+
+                        if (!params.SONNET_MODEL.matches(PAT.MODEL_ID))
+                            error("SONNET_MODEL invalid. Got: '${params.SONNET_MODEL.take(40)}'")
+                        if (!params.HAIKU_MODEL.matches(PAT.MODEL_ID))
+                            error("HAIKU_MODEL invalid. Got: '${params.HAIKU_MODEL.take(40)}'")
+
+                        def runName = params.QASE_TEST_RUN_NAME?.trim() ?: ''
+                        if (runName && !runName.matches(PAT.QASE_RUN_NAME))
+                            error('QASE_TEST_RUN_NAME has disallowed characters')
+                        def resolvedRunName = runName ?:
+                            "Agentic QA - PR-${prRaw} - ${new Date().format('yyyy-MM-dd')}"
+
+                        def mcpUrl = params.QASE_MCP_SERVER_URL?.trim() ?: ''
+                        if (mcpUrl && !mcpUrl.matches(PAT.MCP_URL))
+                            error("QASE_MCP_SERVER_URL must be http(s)://host[:port]/(mcp|sse). Got: '${mcpUrl.take(100)}'")
+
+                        if (!params.TEST_TIMEOUT.matches(PAT.TIMEOUT))
+                            error("TEST_TIMEOUT invalid. Got: '${params.TEST_TIMEOUT.take(20)}'")
+                        if (!params.MAX_RERUNS.matches(PAT.MAX_RERUNS))
+                            error("MAX_RERUNS must be 0-10. Got: '${params.MAX_RERUNS.take(5)}'")
+
+                        // ── Stage ADDITIONAL_CONTEXT to file (never a shell arg) ──
+                        writeFile file: CTX_FILE, text: params.ADDITIONAL_CONTEXT ?: ''
+
+                        // ── Write Google SA key to workspace for container mount ──
+                        // GOOGLE_SA_FILE is an agent-local path from Jenkins credentials.
+                        // sh copy via absolute path — no secret value touches a shell arg.
+                        sh "cp '${GOOGLE_SA_FILE}' '${GCP_CREDS}'"
+
+                        // ── Initialize pipeline_state.json ────────────────────────
+                        writeJSON file: STATE_FILE, json: [
+                            qase_runs: [], qase_defects: [],
+                            github_issues: [], github_prs: [],
+                        ]
+
+                        // ── Write env file for docker run --env-file ──────────────
+                        // Credentials are written here by Groovy — never interpolated
+                        // into shell command strings. The file is chmod 600 immediately.
+                        //
+                        // SECURITY: All values written are either:
+                        //   a) Validated against strict regex patterns (above), OR
+                        //   b) Opaque credential tokens from Jenkins (not user-supplied)
+                        //
+                        // The docker run commands reference this file by its fixed path;
+                        // no credential value is ever in a shell argument.
+                        def envLines = []
+
+                        // Credentials (from Jenkins credential store)
+                        envLines += "GITHUB_TOKEN=${GITHUB_TOKEN}"
+                        envLines += "QASE_API_TOKEN=${QASE_API_TOKEN}"
+                        envLines += "CLAUDE_API_KEY=${CLAUDE_API_KEY}"
+                        envLines += "GOOGLE_APPLICATION_CREDENTIALS=/run/google_creds.json"
+                        envLines += "COPILOT_TOKEN=${COPILOT_TOKEN}"
+                        envLines += "GITHUB_MCP_TOKEN=${GITHUB_MCP_TOKEN}"
+
+                        // Validated parameters
+                        envLines += "AGENTIC_PR_NUMBER=${prRaw}"
+                        envLines += "AGENTIC_REPO=${params.RANCHER_REPO}"
+                        envLines += "AGENTIC_PROVIDER=${params.LLM_PROVIDER}"
+                        envLines += "AGENTIC_VERTEX_PROJECT=${params.VERTEX_PROJECT_ID ?: ''}"
+                        envLines += "AGENTIC_VERTEX_LOCATION=${params.VERTEX_LOCATION}"
+                        envLines += "AGENTIC_SONNET_MODEL=${params.SONNET_MODEL}"
+                        envLines += "AGENTIC_HAIKU_MODEL=${params.HAIKU_MODEL}"
+                        envLines += "AGENTIC_QASE_PROJECT=${params.QASE_PROJECT}"
+                        envLines += "AGENTIC_QASE_RUN_NAME=${resolvedRunName}"
+                        envLines += "AGENTIC_MCP_URL=${mcpUrl}"
+                        envLines += "AGENTIC_TEST_TIMEOUT=${params.TEST_TIMEOUT}"
+                        envLines += "AGENTIC_MAX_RERUNS=${params.MAX_RERUNS}"
+                        envLines += "AGENTIC_AUTO_TRIGGER=${params.AUTO_TRIGGER_TESTS}"
+                        envLines += "AGENTIC_AUTO_ISSUES=${params.AUTO_CREATE_ISSUES}"
+                        envLines += "AGENTIC_AUTO_PRS=${params.AUTO_CREATE_PRS}"
+                        envLines += "AGENTIC_USE_COPILOT=${params.USE_COPILOT_FOR_FIXES}"
+                        envLines += "AGENTIC_DRY_RUN=${params.DRY_RUN}"
+                        envLines += "AGENTIC_CLEANUP_MODE=${params.CLEANUP_MODE}"
+
+                        writeFile file: ENV_FILE, text: envLines.join('\n') + '\n'
+                        sh "chmod 600 '${ENV_FILE}' '${GCP_CREDS}'"
+
+                        echo """=== Agentic QA Pipeline ===
+PR:        ${params.RANCHER_REPO}#${prRaw}
+Provider:  ${params.LLM_PROVIDER}
+Qase:      ${params.QASE_PROJECT}
+MCP:       ${mcpUrl ?: '(not configured)'}
+Dry run:   ${params.DRY_RUN}
+Cleanup:   ${params.CLEANUP_MODE}
+All inputs validated."""
+                    }
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STAGE 2: BUILD CONTAINER IMAGE
+        // Matches the `docker build` pattern from Jenkinsfile.individual.e2e.
+        // Build context is the repo root (WORKSPACE) so COPY . . in the
+        // Dockerfile picks up the full source tree including go.mod/go.sum.
+        ////////////////////////////////////////////////////////////////////////
+        stage('Build Container') {
+            steps {
+                script {
+                    AGENTIC_IMAGE = "${IMAGE_BASE}-${env.BUILD_NUMBER}"
+                    currentBuild.displayName = "#${env.BUILD_NUMBER} - ${params.RANCHER_REPO}#${params.RANCHER_PR_NUMBER}"
+
+                    sh """
+                        docker build \\
+                            --no-cache \\
+                            --platform linux/amd64 \\
+                            -t ${AGENTIC_IMAGE} \\
+                            -f validation/pipeline/Dockerfile.agentic-qa \\
+                            .
+                    """
+
+                    echo "Built image: ${AGENTIC_IMAGE}"
+
+                    // Smoke-test: verify the binary exists and responds
+                    sh "docker run --rm ${AGENTIC_IMAGE} --help > /dev/null"
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // STAGE 3: VALIDATE CREDENTIALS
+        ////////////////////////////////////////////////////////////////////////
+        stage('Validate Credentials') {
+            steps {
+                script {
+                    sh """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            ${AGENTIC_IMAGE} \\
+                            validate \\
+                                --provider       "\${AGENTIC_PROVIDER:-vertex-ai}" \\
+                                --vertex-project "\${AGENTIC_VERTEX_PROJECT}" \\
+                                --vertex-location "\${AGENTIC_VERTEX_LOCATION}" \\
+                                --qase-project   "\${AGENTIC_QASE_PROJECT}"
+                    """
+                }
+            }
+        }
+
+        ////////////////////////////////////////////////////////////////////////
+        // HELPER: shared docker run wrapper
+        // All steps call _run() to ensure consistent flags.
+        ////////////////////////////////////////////////////////////////////////
+
+        ////////////////////////////////////////////////////////////////////////
+        // STEP 1: IDENTIFY TESTS                                      [Haiku]
         ////////////////////////////////////////////////////////////////////////
         stage('Step 1: Identify Tests') {
             steps {
-                container('agentic-qa') {
-                    script {
-                        def rc = sh(script: '''
-                            agentic-qa identify \
-                                --provider         "$VE_PROVIDER"          \
-                                --vertex-project   "$VE_VERTEX_PROJECT"    \
-                                --vertex-location  "$VE_VERTEX_LOCATION"   \
-                                --haiku-model      "$VE_HAIKU_MODEL"       \
-                                --qase-project     "$VE_QASE_PROJECT"      \
-                                --pr-number        "$VE_PR_NUMBER"         \
-                                --repo             "$VE_REPO"              \
-                                --mapping-file     "${WORKSPACE}/feature_test_mapping.json" \
-                                --output-file      "${WORKSPACE}/identified_tests.json"    \
-                                --additional-context-file "$VE_CONTEXT_FILE"
-                        ''', returnStatus: true)
-                        if (rc != 0) error("Step 1 failed (exit ${rc})")
+                script {
+                    sh """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            -v "\${PWD}:/workspace" \\
+                            -w /workspace \\
+                            ${AGENTIC_IMAGE} \\
+                            identify \\
+                                --provider          "\${AGENTIC_PROVIDER}" \\
+                                --vertex-project    "\${AGENTIC_VERTEX_PROJECT}" \\
+                                --vertex-location   "\${AGENTIC_VERTEX_LOCATION}" \\
+                                --haiku-model       "\${AGENTIC_HAIKU_MODEL}" \\
+                                --qase-project      "\${AGENTIC_QASE_PROJECT}" \\
+                                --pr-number         "\${AGENTIC_PR_NUMBER}" \\
+                                --repo              "\${AGENTIC_REPO}" \\
+                                --mapping-file      /workspace/feature_test_mapping.json \\
+                                --output-file       /workspace/identified_tests.json \\
+                                --additional-context-file /workspace/${CTX_FILE}
+                    """
 
-                        def d = readJSON file: "${WORKSPACE}/identified_tests.json"
+                    if (fileExists('identified_tests.json')) {
+                        def d = readJSON file: 'identified_tests.json'
                         PIPELINE_RESULT['identified_tests'] = d
                         echo "Tests: ${d.tests?.size() ?: 0} | Areas: ${d.feature_areas?.join(', ') ?: '(none)'}"
                         if (!d.tests) { currentBuild.result = 'UNSTABLE' }
@@ -267,39 +351,45 @@ All inputs validated."""
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 2: TRIGGER TESTS                                [Direct API]
+        // STEP 2: TRIGGER TESTS                                  [Direct API]
         ////////////////////////////////////////////////////////////////////////
         stage('Step 2: Trigger Tests') {
             when {
                 allOf {
-                    environment name: VE_AUTO_TRIGGER, value: 'true'
-                    environment name: VE_DRY_RUN,      value: 'false'
+                    expression { params.AUTO_TRIGGER_TESTS }
+                    expression { !params.DRY_RUN }
                     expression { PIPELINE_RESULT['identified_tests']?.tests?.size() > 0 }
                 }
             }
             steps {
-                container('agentic-qa') {
-                    script {
-                        def rc = sh(script: '''
-                            agentic-qa trigger \
-                                --provider         "$VE_PROVIDER"          \
-                                --vertex-project   "$VE_VERTEX_PROJECT"    \
-                                --vertex-location  "$VE_VERTEX_LOCATION"   \
-                                --qase-project     "$VE_QASE_PROJECT"      \
-                                --mcp-url          "$VE_MCP_URL"           \
-                                --state-file       "${WORKSPACE}/pipeline_state.json" \
-                                --identified-tests "${WORKSPACE}/identified_tests.json" \
-                                --trigger-mapping  "${WORKSPACE}/jenkins_trigger_mapping.json" \
-                                --qase-run-name    "$VE_QASE_RUN_NAME"    \
-                                --test-timeout     "$VE_TEST_TIMEOUT"      \
-                                --pr-number        "$VE_PR_NUMBER"         \
-                                --repo             "$VE_REPO"              \
-                                --output-file      "${WORKSPACE}/triggered_jobs.json" \
-                                --jenkins-url      "${JENKINS_URL}"
-                        ''', returnStatus: true)
-                        if (rc != 0) error("Step 2 failed (exit ${rc})")
+                script {
+                    sh """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            -v "\${PWD}:/workspace" \\
+                            -w /workspace \\
+                            ${AGENTIC_IMAGE} \\
+                            trigger \\
+                                --provider          "\${AGENTIC_PROVIDER}" \\
+                                --vertex-project    "\${AGENTIC_VERTEX_PROJECT}" \\
+                                --vertex-location   "\${AGENTIC_VERTEX_LOCATION}" \\
+                                --qase-project      "\${AGENTIC_QASE_PROJECT}" \\
+                                --mcp-url           "\${AGENTIC_MCP_URL}" \\
+                                --state-file        /workspace/${STATE_FILE} \\
+                                --identified-tests  /workspace/identified_tests.json \\
+                                --trigger-mapping   /workspace/jenkins_trigger_mapping.json \\
+                                --qase-run-name     "\${AGENTIC_QASE_RUN_NAME}" \\
+                                --test-timeout      "\${AGENTIC_TEST_TIMEOUT}" \\
+                                --pr-number         "\${AGENTIC_PR_NUMBER}" \\
+                                --repo              "\${AGENTIC_REPO}" \\
+                                --output-file       /workspace/triggered_jobs.json \\
+                                --jenkins-url       "${env.JENKINS_URL}"
+                    """
 
-                        def d = readJSON file: "${WORKSPACE}/triggered_jobs.json"
+                    if (fileExists('triggered_jobs.json')) {
+                        def d = readJSON file: 'triggered_jobs.json'
                         PIPELINE_RESULT['triggered_jobs'] = d
                         echo "Qase run: ${d.qase_run_id ?: 'N/A'} | Jobs: ${d.jobs?.size() ?: 0}"
                     }
@@ -308,34 +398,39 @@ All inputs validated."""
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 2b: WAIT FOR TESTS
+        // STEP 2b: WAIT FOR TEST COMPLETION
         ////////////////////////////////////////////////////////////////////////
         stage('Step 2b: Wait for Tests') {
             when {
                 allOf {
-                    environment name: VE_AUTO_TRIGGER, value: 'true'
-                    environment name: VE_DRY_RUN,      value: 'false'
+                    expression { params.AUTO_TRIGGER_TESTS }
+                    expression { !params.DRY_RUN }
                     expression { PIPELINE_RESULT['triggered_jobs']?.jobs?.size() > 0 }
                 }
             }
             steps {
-                container('agentic-qa') {
-                    script {
-                        timeout(time: 360, unit: 'MINUTES') {
-                            sh '''
-                                agentic-qa wait \
-                                    --provider         "$VE_PROVIDER"          \
-                                    --vertex-project   "$VE_VERTEX_PROJECT"    \
-                                    --vertex-location  "$VE_VERTEX_LOCATION"   \
-                                    --qase-project     "$VE_QASE_PROJECT"      \
-                                    --mcp-url          "$VE_MCP_URL"           \
-                                    --triggered-jobs   "${WORKSPACE}/triggered_jobs.json" \
-                                    --poll-interval    120                     \
-                                    --output-file      "${WORKSPACE}/completed_jobs.json" \
-                                    --jenkins-url      "${JENKINS_URL}"
-                            '''
-                        }
-                        def d = readJSON file: "${WORKSPACE}/completed_jobs.json"
+                script {
+                    timeout(time: 360, unit: 'MINUTES') {
+                        sh """
+                            docker run --rm \\
+                                --platform linux/amd64 \\
+                                --env-file '${ENV_FILE}' \\
+                                -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                                -v "\${PWD}:/workspace" \\
+                                -w /workspace \\
+                                ${AGENTIC_IMAGE} \\
+                                wait \\
+                                    --qase-project   "\${AGENTIC_QASE_PROJECT}" \\
+                                    --mcp-url        "\${AGENTIC_MCP_URL}" \\
+                                    --triggered-jobs /workspace/triggered_jobs.json \\
+                                    --poll-interval  120 \\
+                                    --output-file    /workspace/completed_jobs.json \\
+                                    --jenkins-url    "${env.JENKINS_URL}"
+                        """
+                    }
+
+                    if (fileExists('completed_jobs.json')) {
+                        def d = readJSON file: 'completed_jobs.json'
                         PIPELINE_RESULT['completed_jobs'] = d
                         echo "OK: ${d.completed?.size() ?: 0} | Failed: ${d.failed?.size() ?: 0}"
                     }
@@ -344,7 +439,7 @@ All inputs validated."""
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 3: ANALYZE RESULTS (TRIAGE)                     [Sonnet]
+        // STEP 3: ANALYZE RESULTS (TRIAGE)                          [Sonnet]
         ////////////////////////////////////////////////////////////////////////
         stage('Step 3: Analyze Results') {
             when {
@@ -354,25 +449,33 @@ All inputs validated."""
                 }
             }
             steps {
-                container('agentic-qa') {
-                    script {
-                        def rc = sh(script: '''
-                            agentic-qa analyze \
-                                --provider           "$VE_PROVIDER"          \
-                                --vertex-project     "$VE_VERTEX_PROJECT"    \
-                                --vertex-location    "$VE_VERTEX_LOCATION"   \
-                                --sonnet-model       "$VE_SONNET_MODEL"      \
-                                --qase-project       "$VE_QASE_PROJECT"      \
-                                --mcp-url            "$VE_MCP_URL"           \
-                                --completed-jobs     "${WORKSPACE}/completed_jobs.json" \
-                                --triage-framework   "${WORKSPACE}/triage_framework.json" \
-                                --feature-mapping    "${WORKSPACE}/feature_test_mapping.json" \
-                                --output-file        "${WORKSPACE}/triage_results.json"     \
-                                --additional-context-file "$VE_CONTEXT_FILE"
-                        ''', returnStatus: true)
-                        if (rc != 0) echo "WARNING: Triage had errors (exit ${rc})"
+                script {
+                    def rc = sh(script: """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            -v "\${PWD}:/workspace" \\
+                            -w /workspace \\
+                            ${AGENTIC_IMAGE} \\
+                            analyze \\
+                                --provider              "\${AGENTIC_PROVIDER}" \\
+                                --vertex-project        "\${AGENTIC_VERTEX_PROJECT}" \\
+                                --vertex-location       "\${AGENTIC_VERTEX_LOCATION}" \\
+                                --sonnet-model          "\${AGENTIC_SONNET_MODEL}" \\
+                                --qase-project          "\${AGENTIC_QASE_PROJECT}" \\
+                                --mcp-url               "\${AGENTIC_MCP_URL}" \\
+                                --completed-jobs        /workspace/completed_jobs.json \\
+                                --triage-framework      /workspace/triage_framework.json \\
+                                --feature-mapping       /workspace/feature_test_mapping.json \\
+                                --output-file           /workspace/triage_results.json \\
+                                --additional-context-file /workspace/${CTX_FILE}
+                    """, returnStatus: true)
 
-                        def d = readJSON file: "${WORKSPACE}/triage_results.json"
+                    if (rc != 0) echo "WARNING: Triage had errors (exit ${rc})"
+
+                    if (fileExists('triage_results.json')) {
+                        def d = readJSON file: 'triage_results.json'
                         PIPELINE_RESULT['triage'] = d
                         echo "Product: ${d.product_defects?.size() ?: 0} | Test: ${d.test_defects?.size() ?: 0} | Config: ${d.config_issues?.size() ?: 0} | Pass: ${d.passed?.size() ?: 0}"
                     }
@@ -381,7 +484,7 @@ All inputs validated."""
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 4: HANDLE DEFECTS                      [Sonnet + Haiku]
+        // STEP 4: HANDLE DEFECTS                            [Sonnet + Haiku]
         ////////////////////////////////////////////////////////////////////////
         stage('Step 4: Handle Defects') {
             when {
@@ -391,29 +494,37 @@ All inputs validated."""
                 }
             }
             steps {
-                container('agentic-qa') {
-                    script {
-                        sh '''
-                            agentic-qa defects \
-                                --provider           "$VE_PROVIDER"          \
-                                --vertex-project     "$VE_VERTEX_PROJECT"    \
-                                --vertex-location    "$VE_VERTEX_LOCATION"   \
-                                --sonnet-model       "$VE_SONNET_MODEL"      \
-                                --haiku-model        "$VE_HAIKU_MODEL"       \
-                                --qase-project       "$VE_QASE_PROJECT"      \
-                                --mcp-url            "$VE_MCP_URL"           \
-                                --state-file         "${WORKSPACE}/pipeline_state.json" \
-                                --dry-run="$VE_DRY_RUN"                     \
-                                --triage-results     "${WORKSPACE}/triage_results.json" \
-                                --product-repo       "$VE_REPO"              \
-                                --tests-repo         "rancher/tests"         \
-                                --pr-number          "$VE_PR_NUMBER"         \
-                                --auto-create-issues="$VE_AUTO_ISSUES"      \
-                                --auto-create-prs="$VE_AUTO_PRS"            \
-                                --use-copilot="$VE_USE_COPILOT"             \
-                                --output-file        "${WORKSPACE}/defect_actions.json"
-                        '''
-                        def d = readJSON file: "${WORKSPACE}/defect_actions.json"
+                script {
+                    sh """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            -v "\${PWD}:/workspace" \\
+                            -w /workspace \\
+                            ${AGENTIC_IMAGE} \\
+                            defects \\
+                                --provider          "\${AGENTIC_PROVIDER}" \\
+                                --vertex-project    "\${AGENTIC_VERTEX_PROJECT}" \\
+                                --vertex-location   "\${AGENTIC_VERTEX_LOCATION}" \\
+                                --sonnet-model      "\${AGENTIC_SONNET_MODEL}" \\
+                                --haiku-model       "\${AGENTIC_HAIKU_MODEL}" \\
+                                --qase-project      "\${AGENTIC_QASE_PROJECT}" \\
+                                --mcp-url           "\${AGENTIC_MCP_URL}" \\
+                                --state-file        /workspace/${STATE_FILE} \\
+                                --dry-run="\${AGENTIC_DRY_RUN}" \\
+                                --triage-results    /workspace/triage_results.json \\
+                                --product-repo      "\${AGENTIC_REPO}" \\
+                                --tests-repo        "rancher/tests" \\
+                                --pr-number         "\${AGENTIC_PR_NUMBER}" \\
+                                --auto-create-issues="\${AGENTIC_AUTO_ISSUES}" \\
+                                --auto-create-prs="\${AGENTIC_AUTO_PRS}" \\
+                                --use-copilot="\${AGENTIC_USE_COPILOT}" \\
+                                --output-file       /workspace/defect_actions.json
+                    """
+
+                    if (fileExists('defect_actions.json')) {
+                        def d = readJSON file: 'defect_actions.json'
                         PIPELINE_RESULT['defect_actions'] = d
                         echo "Issues: ${d.issues_created?.size() ?: 0} | PRs: ${d.prs_opened?.size() ?: 0} | Copilot: ${d.copilot_assignments?.size() ?: 0}"
                     }
@@ -422,35 +533,43 @@ All inputs validated."""
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 5: HANDLE CONFIG FAILURES              [Haiku + Sonnet]
+        // STEP 5: HANDLE CONFIG FAILURES                    [Haiku + Sonnet]
         ////////////////////////////////////////////////////////////////////////
         stage('Step 5: Handle Config Failures') {
             when {
                 expression { PIPELINE_RESULT['triage']?.config_issues?.size() > 0 }
             }
             steps {
-                container('agentic-qa') {
-                    script {
-                        sh '''
-                            agentic-qa config-failures \
-                                --provider           "$VE_PROVIDER"          \
-                                --vertex-project     "$VE_VERTEX_PROJECT"    \
-                                --vertex-location    "$VE_VERTEX_LOCATION"   \
-                                --sonnet-model       "$VE_SONNET_MODEL"      \
-                                --haiku-model        "$VE_HAIKU_MODEL"       \
-                                --qase-project       "$VE_QASE_PROJECT"      \
-                                --mcp-url            "$VE_MCP_URL"           \
-                                --state-file         "${WORKSPACE}/pipeline_state.json" \
-                                --dry-run="$VE_DRY_RUN"                     \
-                                --triage-results     "${WORKSPACE}/triage_results.json" \
-                                --trigger-mapping    "${WORKSPACE}/jenkins_trigger_mapping.json" \
-                                --max-reruns         "$VE_MAX_RERUNS"        \
-                                --tests-repo         "rancher/tests"         \
-                                --auto-create-prs="$VE_AUTO_PRS"            \
-                                --output-file        "${WORKSPACE}/config_actions.json" \
-                                --jenkins-url        "${JENKINS_URL}"
-                        '''
-                        def d = readJSON file: "${WORKSPACE}/config_actions.json"
+                script {
+                    sh """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            -v "\${PWD}:/workspace" \\
+                            -w /workspace \\
+                            ${AGENTIC_IMAGE} \\
+                            config-failures \\
+                                --provider          "\${AGENTIC_PROVIDER}" \\
+                                --vertex-project    "\${AGENTIC_VERTEX_PROJECT}" \\
+                                --vertex-location   "\${AGENTIC_VERTEX_LOCATION}" \\
+                                --sonnet-model      "\${AGENTIC_SONNET_MODEL}" \\
+                                --haiku-model       "\${AGENTIC_HAIKU_MODEL}" \\
+                                --qase-project      "\${AGENTIC_QASE_PROJECT}" \\
+                                --mcp-url           "\${AGENTIC_MCP_URL}" \\
+                                --state-file        /workspace/${STATE_FILE} \\
+                                --dry-run="\${AGENTIC_DRY_RUN}" \\
+                                --triage-results    /workspace/triage_results.json \\
+                                --trigger-mapping   /workspace/jenkins_trigger_mapping.json \\
+                                --max-reruns        "\${AGENTIC_MAX_RERUNS}" \\
+                                --tests-repo        "rancher/tests" \\
+                                --auto-create-prs="\${AGENTIC_AUTO_PRS}" \\
+                                --output-file       /workspace/config_actions.json \\
+                                --jenkins-url       "${env.JENKINS_URL}"
+                    """
+
+                    if (fileExists('config_actions.json')) {
+                        def d = readJSON file: 'config_actions.json'
                         PIPELINE_RESULT['config_actions'] = d
                         echo "Reruns: ${d.reruns?.size() ?: 0} | Guards: ${d.guards?.size() ?: 0} | PRs: ${d.prs_opened?.size() ?: 0}"
                     }
@@ -459,30 +578,34 @@ All inputs validated."""
         }
 
         ////////////////////////////////////////////////////////////////////////
-        // STEP 6: CLEANUP
+        // STEP 6: CLEANUP (when CLEANUP_MODE=true)
         ////////////////////////////////////////////////////////////////////////
         stage('Step 6: Cleanup') {
-            when { environment name: VE_CLEANUP_MODE, value: 'true' }
+            when { expression { params.CLEANUP_MODE } }
             steps {
-                container('agentic-qa') {
-                    script {
-                        def rc = sh(script: '''
-                            agentic-qa cleanup \
-                                --provider         "$VE_PROVIDER"          \
-                                --vertex-project   "$VE_VERTEX_PROJECT"    \
-                                --vertex-location  "$VE_VERTEX_LOCATION"   \
-                                --qase-project     "$VE_QASE_PROJECT"      \
-                                --mcp-url          "$VE_MCP_URL"           \
-                                --state-file       "${WORKSPACE}/pipeline_state.json" \
-                                --dry-run="$VE_DRY_RUN"                   \
-                                --output-file      "${WORKSPACE}/cleanup_result.json"
-                        ''', returnStatus: true)
-                        if (rc != 0) echo "WARNING: Cleanup had errors (exit ${rc})"
-                        if (fileExists("${WORKSPACE}/cleanup_result.json")) {
-                            def d = readJSON file: "${WORKSPACE}/cleanup_result.json"
-                            PIPELINE_RESULT['cleanup'] = d
-                            echo "Runs deleted: ${d.qase_runs_deleted ?: 0} | Defects deleted: ${d.qase_defects_deleted ?: 0} | Issues closed: ${d.github_issues_closed ?: 0} | PRs closed: ${d.github_prs_closed ?: 0}"
-                        }
+                script {
+                    def rc = sh(script: """
+                        docker run --rm \\
+                            --platform linux/amd64 \\
+                            --env-file '${ENV_FILE}' \\
+                            -v "\${PWD}/${GCP_CREDS}:/run/google_creds.json:ro" \\
+                            -v "\${PWD}:/workspace" \\
+                            -w /workspace \\
+                            ${AGENTIC_IMAGE} \\
+                            cleanup \\
+                                --qase-project "\${AGENTIC_QASE_PROJECT}" \\
+                                --mcp-url      "\${AGENTIC_MCP_URL}" \\
+                                --state-file   /workspace/${STATE_FILE} \\
+                                --dry-run="\${AGENTIC_DRY_RUN}" \\
+                                --output-file  /workspace/cleanup_result.json
+                    """, returnStatus: true)
+
+                    if (rc != 0) echo "WARNING: Cleanup had errors (exit ${rc})"
+
+                    if (fileExists('cleanup_result.json')) {
+                        def d = readJSON file: 'cleanup_result.json'
+                        PIPELINE_RESULT['cleanup'] = d
+                        echo "Runs deleted: ${d.qase_runs_deleted ?: 0} | Defects deleted: ${d.qase_defects_deleted ?: 0} | Issues closed: ${d.github_issues_closed ?: 0} | PRs closed: ${d.github_prs_closed ?: 0}"
                     }
                 }
             }
@@ -493,12 +616,10 @@ All inputs validated."""
         ////////////////////////////////////////////////////////////////////////
         stage('Summary') {
             steps {
-                container('agentic-qa') {
-                    script {
-                        echo buildSummary(PIPELINE_RESULT)
-                        writeJSON file: "${WORKSPACE}/pipeline_summary.json",
-                                  json: PIPELINE_RESULT, pretty: 2
-                    }
+                script {
+                    echo buildSummary(PIPELINE_RESULT)
+                    writeJSON file: 'pipeline_summary.json',
+                              json: PIPELINE_RESULT, pretty: 2
                 }
             }
         }
@@ -506,11 +627,19 @@ All inputs validated."""
 
     post {
         always {
+            // Remove the built image
+            script {
+                if (AGENTIC_IMAGE) {
+                    sh "docker rmi -f ${AGENTIC_IMAGE} || true"
+                }
+            }
+            // Archive outputs; delete sensitive files
             archiveArtifacts artifacts: 'pipeline_summary.json, cleanup_result.json',
                              allowEmptyArchive: true
-        }
-        cleanup {
-            sh 'rm -f "${WORKSPACE}/.agentic_context.txt" 2>/dev/null || true'
+            // Remove credentials staging files from workspace
+            sh """
+                rm -f '${ENV_FILE}' '${GCP_CREDS}' '${CTX_FILE}' || true
+            """
         }
     }
 }
@@ -521,7 +650,7 @@ def buildSummary(Map r) {
     def sep = '=' * 70
     def s = new StringBuilder()
     s << sep << '\n  AGENTIC QA PIPELINE SUMMARY\n'
-    s << "  PR: ${env[VE_REPO]}#${env[VE_PR_NUMBER]}\n" << sep << '\n\n'
+    s << "  PR: ${params.RANCHER_REPO}#${params.RANCHER_PR_NUMBER}\n" << sep << '\n\n'
 
     def t = r.identified_tests
     s << "1. Tests identified: ${t?.tests?.size() ?: 0}  (${t?.feature_areas?.join(', ') ?: '-'})\n"
