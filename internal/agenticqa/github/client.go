@@ -157,12 +157,14 @@ func (c *Client) CreateIssue(ctx context.Context, owner, repo, title, body strin
 }
 
 // CreatePR creates a pull request and returns its HTML URL.
-func (c *Client) CreatePR(ctx context.Context, owner, repo, branch, base, title, body string) (string, error) {
+// Set draft=true to open it as a draft PR (useful for local testing).
+func (c *Client) CreatePR(ctx context.Context, owner, repo, branch, base, title, body string, draft bool) (string, error) {
 	newPR := &gh.NewPullRequest{
 		Title: gh.Ptr(title),
 		Head:  gh.Ptr(branch),
 		Base:  gh.Ptr(base),
 		Body:  gh.Ptr(body),
+		Draft: gh.Ptr(draft),
 	}
 
 	pr, _, err := c.client.PullRequests.Create(ctx, owner, repo, newPR)

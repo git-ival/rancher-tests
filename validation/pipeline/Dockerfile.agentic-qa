@@ -20,6 +20,8 @@ WORKDIR /src
 
 # Download dependencies first (layer caching)
 COPY go.mod go.sum ./
+COPY actions/go.mod actions/go.sum ./actions/
+COPY interoperability/go.mod interoperability/go.sum ./interoperability/
 RUN go mod download
 
 # Copy source and build
@@ -45,7 +47,7 @@ RUN apk add --no-cache \
 COPY --from=builder /agentic-qa /usr/local/bin/agentic-qa
 
 # gotestsum
-COPY --from=builder /root/go/bin/gotestsum /usr/local/bin/gotestsum
+COPY --from=builder /go/bin/gotestsum /usr/local/bin/gotestsum
 
 # kubectl (pinned to a stable minor)
 RUN KUBECTL_VERSION="$(curl -sL https://dl.k8s.io/release/stable.txt)" && \

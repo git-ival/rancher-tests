@@ -11,22 +11,43 @@ type IdentifiedTests struct {
 	RecommendedTags []string    `json:"recommended_tags"`
 	RecommendedJobs []string    `json:"recommended_jobs"`
 	Confidence      string      `json:"confidence"`
+	// QaseProjects is the de-duplicated, consolidated list of Qase project codes
+	// that will each receive one test run. Populated by identify after LLM call.
+	QaseProjects []string `json:"qase_projects"`
+	// TestsByProject maps each project code to the indices of its assigned tests
+	// in the Tests slice. Populated by identify after consolidation.
+	TestsByProject map[string][]int `json:"tests_by_project"`
 }
 
 // TestEntry describes a single test identified for execution.
 type TestEntry struct {
-	File           string   `json:"file"`
-	Suite          string   `json:"suite,omitempty"`
-	Functions      []string `json:"functions,omitempty"`
-	BuildTags      []string `json:"build_tags,omitempty"`
-	QaseProjects   []string `json:"qase_projects,omitempty"`
-	QaseSchema     string   `json:"qase_schema,omitempty"`
-	RelevanceScore float64  `json:"relevance_score,omitempty"`
-	Reasoning      string   `json:"reasoning,omitempty"`
+	File         string   `json:"file"`
+	Suite        string   `json:"suite,omitempty"`
+	Functions    []string `json:"functions,omitempty"`
+	BuildTags    []string `json:"build_tags,omitempty"`
+	QaseProjects []string `json:"qase_projects,omitempty"`
+	QaseCaseIDs  []int    `json:"qase_case_ids,omitempty"`
+	// QaseCasesByProject maps each Qase project code to the case IDs that
+	// belong to that specific project. This ensures the trigger step only
+	// sends project-valid case IDs when creating runs.
+	QaseCasesByProject map[string][]int `json:"qase_cases_by_project,omitempty"`
+	QaseSchema         string           `json:"qase_schema,omitempty"`
+	RelevanceScore     float64          `json:"relevance_score,omitempty"`
+	Reasoning          string           `json:"reasoning,omitempty"`
+}
+
+// TriggeredQaseRun records a single Qase run created for one project.
+type TriggeredQaseRun struct {
+	Project string `json:"project"`
+	RunID   int    `json:"run_id"`
 }
 
 // TriggeredJobs is the output of the "trigger" step.
 type TriggeredJobs struct {
+	// QaseRuns holds one entry per Qase project that received a run.
+	QaseRuns []TriggeredQaseRun `json:"qase_runs"`
+	// QaseRunID and QaseProject retain the first run for backward compat
+	// with anything consuming the single-run output format.
 	QaseRunID   *int           `json:"qase_run_id"`
 	QaseProject string         `json:"qase_project"`
 	Jobs        []TriggeredJob `json:"jobs"`
@@ -45,11 +66,13 @@ type TriggeredJob struct {
 
 // CompletedJobs is the output of the "wait" step.
 type CompletedJobs struct {
-	QaseRunID            *int           `json:"qase_run_id"`
-	Completed            []CompletedJob `json:"completed"`
-	Failed               []CompletedJob `json:"failed"`
-	TotalDurationMinutes float64        `json:"total_duration_minutes"`
-	CompletedAt          string         `json:"completed_at"`
+	// QaseRuns propagates the per-project run list from TriggeredJobs.
+	QaseRuns             []TriggeredQaseRun `json:"qase_runs"`
+	QaseRunID            *int               `json:"qase_run_id"` // compat
+	Completed            []CompletedJob     `json:"completed"`
+	Failed               []CompletedJob     `json:"failed"`
+	TotalDurationMinutes float64            `json:"total_duration_minutes"`
+	CompletedAt          string             `json:"completed_at"`
 }
 
 // CompletedJob describes a single Jenkins job that has finished.
@@ -152,4 +175,90 @@ type CleanupResult struct {
 	GithubIssuesClosed int      `json:"github_issues_closed"`
 	GithubPRsClosed    int      `json:"github_prs_closed"`
 	Errors             []string `json:"errors"`
+}
+
+// ---------------------------------------------------------------------------
+// Feature Test Mapping types (output of generate-feature-map)
+// ---------------------------------------------------------------------------
+
+// FeatureTestMapping is the top-level structure of feature_test_mapping.json.
+type FeatureTestMapping struct {
+	Metadata     MappingMetadata        `json:"_metadata"`
+	FeatureAreas map[string]FeatureArea `json:"feature_areas"`
+}
+
+// MappingMetadata holds generation metadata for a mapping file.
+type MappingMetadata struct {
+	GeneratedAt string `json:"generated_at"`
+	GeneratedBy string `json:"generated_by"`
+	Version     string `json:"version"`
+}
+
+// FeatureArea describes one feature area and its associated test files.
+type FeatureArea struct {
+	Description     string     `json:"description"`
+	ProductPackages []string   `json:"product_packages"`
+	TestFiles       []TestFile `json:"test_files"`
+	ActionsPackages []string   `json:"actions_packages"`
+	JenkinsJobs     []string   `json:"jenkins_jobs"`
+	PITTags         []string   `json:"pit_tags"`
+}
+
+// TestFile describes a single test file within a feature area.
+type TestFile struct {
+	Path          string     `json:"path"`
+	BuildTags     []string   `json:"build_tags"`
+	TestSuite     string     `json:"test_suite"`
+	TestFunctions []string   `json:"test_functions"`
+	QaseSchema    *string    `json:"qase_schema"`
+	QaseProjects  []string   `json:"qase_projects"`
+	QaseCases     []QaseCase `json:"qase_cases"`
+}
+
+// QaseCase represents a Qase test case entry in the feature test mapping.
+// The ID is populated by querying the Qase API during mapping generation.
+type QaseCase struct {
+	ID                 int    `json:"id"`
+	Title              string `json:"title"`
+	AutomationTestName string `json:"automation_test_name"`
+}
+
+// ---------------------------------------------------------------------------
+// Jenkins Trigger Mapping types (output of generate-trigger-map)
+// ---------------------------------------------------------------------------
+
+// JenkinsTriggerMapping is the top-level structure of jenkins_trigger_mapping.json.
+type JenkinsTriggerMapping struct {
+	Metadata             MappingMetadata            `json:"_metadata"`
+	JobMappings          map[string]JobMapping      `json:"job_mappings"`
+	TagToJob             map[string]string          `json:"tag_to_job"`
+	TagToJobHierarchy    map[string][]string        `json:"tag_to_job_hierarchy"`
+	QaseProjects         map[string]QaseProjectInfo `json:"qase_projects"`
+	QaseParameterMapping map[string]string          `json:"qase_parameter_mapping"`
+	JenkinsfileMapping   map[string]string          `json:"jenkinsfile_mapping"`
+}
+
+// JobMapping describes a single Jenkins job and its configuration.
+type JobMapping struct {
+	Description    string                  `json:"description"`
+	YAMLSource     string                  `json:"yaml_source"`
+	Jenkinsfile    string                  `json:"jenkinsfile"`
+	Folder         string                  `json:"folder"`
+	QaseProject    string                  `json:"qase_project"`
+	QaseReporter   string                  `json:"qase_reporter"`
+	ApplicableTags []string                `json:"applicable_tags"`
+	Parameters     map[string]JobParameter `json:"parameters"`
+}
+
+// JobParameter describes a single parameter of a Jenkins job.
+type JobParameter struct {
+	Type            string `json:"type"`
+	Default         string `json:"default"`
+	RequiredForQase bool   `json:"required_for_qase,omitempty"`
+}
+
+// QaseProjectInfo describes a Qase project referenced in the trigger mapping.
+type QaseProjectInfo struct {
+	Name           string   `json:"name"`
+	AutomationTags []string `json:"automation_tags"`
 }

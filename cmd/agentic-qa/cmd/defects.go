@@ -105,6 +105,12 @@ var defectsCmd = &cobra.Command{
 					labels = append(labels, "severity/"+defect.RecommendedSeverity)
 				}
 
+				if localTest {
+					title = localTestPrefix + title
+					body = "> ⚠️ **LOCAL TEST Artifact** — created by `--local-test` mode. Safe to delete.\n\n" + body
+					logrus.Infof("Local-test mode: prefixing issue title with %q for %s", localTestPrefix, defect.TestName)
+				}
+
 				issueURL, err := gh.CreateIssue(ctx, owner, repo, title, body, labels)
 				if err != nil {
 					logrus.Errorf("Failed to create issue for %s: %v", defect.TestName, err)
@@ -158,7 +164,7 @@ var defectsCmd = &cobra.Command{
 				}
 
 				// Copilot or Claude fix generation
-				if defectsUseCopilot {
+				if defectsUseCopilot && !localTest {
 					issueNum := extractIssueNumber(issueURL)
 					if issueNum > 0 {
 						if err := gh.AssignCopilot(ctx, owner, repo, issueNum, ghToken); err != nil {
@@ -172,8 +178,7 @@ var defectsCmd = &cobra.Command{
 					}
 				}
 			} else if dryRun {
-				logrus.Infof("Dry-run: would create issue for %s in %s/%s", defect.TestName, owner, repo)
-			} else {
+				logrus.Infof("Dry-run: would create issue for %s in %s/%s", defect.TestName, owner, repo)			} else {
 				result.Escalated = append(result.Escalated, types.EscalatedDefect{
 					TestName: defect.TestName,
 					Reason:   "auto-create-issues is disabled",

@@ -43,7 +43,7 @@ type Config struct {
 	Model          string // e.g. "claude-sonnet-4-6-20250514"
 	APIKey         string // required for claude-direct (CLAUDE_API_KEY)
 	VertexProject  string // required for vertex-ai (GCP project ID)
-	VertexLocation string // GCP location (e.g. "us-east5")
+	VertexLocation string // GCP location (e.g. "global")
 }
 
 // NewClient creates a new LLM client configured for the specified provider.

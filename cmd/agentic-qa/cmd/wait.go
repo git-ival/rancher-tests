@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -32,6 +33,33 @@ func init() {
 	_ = waitCmd.MarkFlagRequired("output-file")
 
 	rootCmd.AddCommand(waitCmd)
+}
+
+// completeQaseRun marks a Qase test run as complete, trying MCP first then REST.
+// Logs warnings on failure but does not return an error — completion is best-effort.
+func completeQaseRun(ctx context.Context, project string, runID int) {
+	mcpClient := qase.NewMCPClient(mcpURL)
+	if mcpClient.IsConfigured() {
+		if _, err := mcpClient.CallTool(ctx, "qase_complete_run", map[string]any{
+			"code": project,
+			"id":   runID,
+		}); err != nil {
+			logrus.Warnf("MCP complete run %d (%s) failed: %v", runID, project, err)
+		} else {
+			logrus.Infof("Completed Qase run %d (%s) via MCP", runID, project)
+			return
+		}
+	}
+	qaseToken := os.Getenv("QASE_API_TOKEN")
+	if qaseToken == "" {
+		logrus.Warnf("Cannot complete Qase run %d (%s): no token and MCP not configured", runID, project)
+		return
+	}
+	if err := qase.NewClient(qaseToken).CompleteTestRun(ctx, project, runID); err != nil {
+		logrus.Warnf("Failed to complete Qase run %d (%s) via REST: %v", runID, project, err)
+	} else {
+		logrus.Infof("Completed Qase run %d (%s) via REST", runID, project)
+	}
 }
 
 var waitCmd = &cobra.Command{
@@ -128,32 +156,23 @@ var waitCmd = &cobra.Command{
 			}
 		}
 
-		// Complete Qase run
-		if triggered.QaseRunID != nil && !dryRun {
-			mcpClient := qase.NewMCPClient(mcpURL)
-			qaseToken := os.Getenv("QASE_API_TOKEN")
-
-			if mcpClient.IsConfigured() {
-				if _, err := mcpClient.CallTool(ctx, "qase_complete_run", map[string]any{
-					"code": qaseProject,
-					"id":   *triggered.QaseRunID,
-				}); err != nil {
-					logrus.Warnf("MCP complete run failed: %v", err)
-				} else {
-					logrus.Infof("Completed Qase run %d via MCP", *triggered.QaseRunID)
+		// Complete all Qase runs tracked in this triggered jobs file.
+		// Falls back to the legacy single-run fields for backward compat.
+		if !dryRun {
+			runsToComplete := triggered.QaseRuns
+			if len(runsToComplete) == 0 && triggered.QaseRunID != nil {
+				runsToComplete = []types.TriggeredQaseRun{
+					{Project: triggered.QaseProject, RunID: *triggered.QaseRunID},
 				}
-			} else if qaseToken != "" {
-				qaseClient := qase.NewClient(qaseToken)
-				if err := qaseClient.CompleteTestRun(ctx, triggered.QaseProject, *triggered.QaseRunID); err != nil {
-					logrus.Warnf("Failed to complete Qase run: %v", err)
-				} else {
-					logrus.Infof("Completed Qase run %d via REST", *triggered.QaseRunID)
-				}
+			}
+			for _, run := range runsToComplete {
+				completeQaseRun(ctx, run.Project, run.RunID)
 			}
 		}
 
 		result := types.CompletedJobs{
-			QaseRunID:            triggered.QaseRunID,
+			QaseRuns:             triggered.QaseRuns, // propagate for downstream consumers
+			QaseRunID:            triggered.QaseRunID, // backward compat
 			Completed:            completed,
 			Failed:               failed,
 			TotalDurationMinutes: time.Since(startTime).Minutes(),

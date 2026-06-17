@@ -13,14 +13,14 @@ import (
 )
 
 var (
-	cfTriageResults   string
-	cfPipelineConfig  string
-	cfTriggerMapping  string
-	cfMaxReruns       int
-	cfTestsRepo       string
-	cfAutoCreatePRs   bool
-	cfOutputFile      string
-	cfJenkinsURL      string
+	cfTriageResults  string
+	cfPipelineConfig string
+	cfTriggerMapping string
+	cfMaxReruns      int
+	cfTestsRepo      string
+	cfAutoCreatePRs  bool
+	cfOutputFile     string
+	cfJenkinsURL     string
 )
 
 func init() {
@@ -102,8 +102,12 @@ Respond with JSON: {"action": "rerun|guard", "reasoning": "string"}`
 
 			switch decision.Action {
 			case "rerun":
-				if jenkinsURL == "" || dryRun {
-					logrus.Infof("Would rerun %s (dry-run or no Jenkins URL)", issue.TestName)
+				if jenkinsURL == "" || dryRun || localTest {
+					if localTest {
+						logrus.Infof("Local-test mode: skipping Jenkins rerun for %s", issue.TestName)
+					} else {
+						logrus.Infof("Would rerun %s (dry-run or no Jenkins URL)", issue.TestName)
+					}
 					result.Reruns = append(result.Reruns, types.RerunEntry{
 						TestName:      issue.TestName,
 						OriginalError: issue.Error,
@@ -192,6 +196,7 @@ Respond with JSON:
 	},
 }
 
+// splitConfigJobName determines the Jenkins folder and job name for a given test, using the trigger mapping if available.
 func splitConfigJobName(testName string, mapping map[string]any) (folder, jobName string) {
 	if mapping != nil {
 		if jobConfig, ok := mapping[testName].(map[string]any); ok {

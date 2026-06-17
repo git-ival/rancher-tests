@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/avast/retry-go/v4"
@@ -26,13 +27,36 @@ type TestResult struct {
 	Hash    string `json:"hash"`
 }
 
+// AutomationTestNameFieldID is the Qase custom field ID that stores the Go
+// test function name used to correlate test results with Qase cases.
+// Matches actions/qase/defaults.go AutomationTestNameID = 15.
+const AutomationTestNameFieldID = 15
+
+// customFieldValue is the raw shape returned by the Qase v1 cases list endpoint.
+type customFieldValue struct {
+	ID    *int    `json:"id"`
+	Value *string `json:"value"`
+}
+
 // TestCase represents a Qase test case.
 type TestCase struct {
-	ID         int    `json:"id"`
-	Title      string `json:"title"`
-	SuiteID    *int   `json:"suite_id"`
-	Priority   int    `json:"priority"`
-	Automation int    `json:"automation"`
+	ID           int                `json:"id"`
+	Title        string             `json:"title"`
+	SuiteID      *int               `json:"suite_id"`
+	Priority     int                `json:"priority"`
+	Automation   int                `json:"automation"`
+	CustomFields []customFieldValue `json:"custom_fields"`
+}
+
+// AutomationTestName returns the value of the AutomationTestName custom field
+// (ID 15) for this test case, or an empty string if not set.
+func (tc *TestCase) AutomationTestName() string {
+	for _, cf := range tc.CustomFields {
+		if cf.ID != nil && *cf.ID == AutomationTestNameFieldID && cf.Value != nil {
+			return *cf.Value
+		}
+	}
+	return ""
 }
 
 // Client wraps the Qase REST API.
@@ -121,8 +145,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 			}
 
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				logrus.WithField("status", resp.StatusCode).Error("Qase API request failed")
-				return retry.Unrecoverable(fmt.Errorf("API error: HTTP %d", resp.StatusCode))
+				// Include truncated response body for diagnostics on client errors.
+				errBody := string(respData)
+				if len(errBody) > 500 {
+					errBody = errBody[:500] + "..."
+				}
+				logrus.WithFields(logrus.Fields{
+					"status": resp.StatusCode,
+					"path":   path,
+					"body":   errBody,
+				}).Error("Qase API request failed")
+				return retry.Unrecoverable(fmt.Errorf("API error: HTTP %d: %s", resp.StatusCode, errBody))
 			}
 
 			// For 204 No Content (e.g. DELETE), there is no body to parse.
@@ -161,6 +194,41 @@ func (c *Client) CreateTestRun(ctx context.Context, project, title, description 
 	result, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/run/%s", url.PathEscape(project)), payload)
 	if err != nil {
 		return 0, fmt.Errorf("creating test run: %w", err)
+	}
+
+	var id idResult
+	if err := json.Unmarshal(result, &id); err != nil {
+		return 0, fmt.Errorf("decoding test run ID: %w", err)
+	}
+	return id.ID, nil
+}
+
+// CreateTestRunWithCases creates a new test run and assigns the provided case IDs.
+// If the API rejects the request due to too many case-configuration combinations
+// (common in projects with configuration groups like RM), it falls back to creating
+// the run without pre-populating cases. The Jenkins Qase reporter will still post
+// results referencing case IDs directly against the run.
+func (c *Client) CreateTestRunWithCases(ctx context.Context, project, title, description string, caseIDs []int) (int, error) {
+	if len(caseIDs) == 0 {
+		return 0, fmt.Errorf("creating test run with cases: caseIDs cannot be empty")
+	}
+
+	payload := map[string]any{
+		"title":       title,
+		"description": description,
+		"cases":       caseIDs,
+	}
+
+	result, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/run/%s", url.PathEscape(project)), payload)
+	if err != nil {
+		// If the error is due to too many combinations (project has configurations
+		// that multiply case count beyond the 1024 limit), fall back to creating
+		// the run without pre-populated cases.
+		if strings.Contains(err.Error(), "HTTP 400") {
+			logrus.Warnf("Qase project %s rejected run with %d cases (likely configuration combinations exceed limit); creating run without pre-populated cases", project, len(caseIDs))
+			return c.CreateTestRun(ctx, project, title, description)
+		}
+		return 0, fmt.Errorf("creating test run with cases: %w", err)
 	}
 
 	var id idResult
@@ -293,4 +361,89 @@ func (c *Client) GetTestHistory(ctx context.Context, project string, caseID, lim
 		return nil, fmt.Errorf("decoding test history: %w", err)
 	}
 	return results, nil
+}
+
+// GetAutomationNameMap fetches all test cases for a project and returns a map of
+// AutomationTestName (custom field 15) → case ID.
+// Cases without the custom field are also indexed by their title as a fallback.
+// Uses paginated requests to handle large projects.
+func (c *Client) GetAutomationNameMap(ctx context.Context, project string) (map[string]int, error) {
+	nameToID := map[string]int{}
+	offset := 0
+	const limit = 100
+
+	for {
+		path := fmt.Sprintf("/case/%s?limit=%d&offset=%d",
+			url.PathEscape(project), limit, offset)
+		result, err := c.doRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("fetching cases for project %s: %w", project, err)
+		}
+
+		var page paginatedResult
+		if err := json.Unmarshal(result, &page); err != nil {
+			return nil, fmt.Errorf("decoding cases page: %w", err)
+		}
+
+		var cases []TestCase
+		if err := json.Unmarshal(page.Entities, &cases); err != nil {
+			return nil, fmt.Errorf("decoding test cases: %w", err)
+		}
+
+		for _, tc := range cases {
+			if name := tc.AutomationTestName(); name != "" {
+				nameToID[name] = tc.ID
+			} else {
+				// Fallback: index by title so schema-only lookups work too.
+				nameToID[tc.Title] = tc.ID
+			}
+		}
+
+		offset += len(cases)
+		if offset >= page.Total {
+			break
+		}
+	}
+
+	return nameToID, nil
+}
+
+// GetTitleMap fetches all test cases for a project and returns a map of
+// case title → case ID. Every case is indexed by its title, regardless of
+// whether it has an AutomationTestName custom field. This is used by the
+// test-function-name fallback when no schema-based mapping exists.
+func (c *Client) GetTitleMap(ctx context.Context, project string) (map[string]int, error) {
+	titleToID := map[string]int{}
+	offset := 0
+	const limit = 100
+
+	for {
+		path := fmt.Sprintf("/case/%s?limit=%d&offset=%d",
+			url.PathEscape(project), limit, offset)
+		result, err := c.doRequest(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, fmt.Errorf("fetching cases for project %s: %w", project, err)
+		}
+
+		var page paginatedResult
+		if err := json.Unmarshal(result, &page); err != nil {
+			return nil, fmt.Errorf("decoding cases page: %w", err)
+		}
+
+		var cases []TestCase
+		if err := json.Unmarshal(page.Entities, &cases); err != nil {
+			return nil, fmt.Errorf("decoding test cases: %w", err)
+		}
+
+		for _, tc := range cases {
+			titleToID[tc.Title] = tc.ID
+		}
+
+		offset += len(cases)
+		if offset >= page.Total {
+			break
+		}
+	}
+
+	return titleToID, nil
 }
