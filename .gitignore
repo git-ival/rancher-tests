@@ -3,3 +3,7 @@
 .idea/
 .kube/
 *.pem
+
+# Agentic QA pipeline — sensitive job-mapping config supplied as a Jenkins
+# parameter at runtime, never committed to the repository.
+*_mapping.json
