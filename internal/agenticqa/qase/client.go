@@ -27,8 +27,9 @@ type TestResult struct {
 	Hash    string `json:"hash"`
 }
 
-// AutomationTestNameFieldID is the Qase custom field ID that stores the Go
-// test function name used to correlate test results with Qase cases.
+// AutomationTestNameFieldID is the default Qase custom field ID that stores
+// the Go test function name.  This value is workspace-specific; override it
+// via Client.WithATNFieldID or by using NewClientWithConfig.
 // Matches actions/qase/defaults.go AutomationTestNameID = 15.
 const AutomationTestNameFieldID = 15
 
@@ -49,10 +50,10 @@ type TestCase struct {
 }
 
 // AutomationTestName returns the value of the AutomationTestName custom field
-// (ID 15) for this test case, or an empty string if not set.
-func (tc *TestCase) AutomationTestName() string {
+// for this test case using the provided field ID, or an empty string if not set.
+func (tc *TestCase) AutomationTestName(atnFieldID int) string {
 	for _, cf := range tc.CustomFields {
-		if cf.ID != nil && *cf.ID == AutomationTestNameFieldID && cf.Value != nil {
+		if cf.ID != nil && *cf.ID == atnFieldID && cf.Value != nil {
 			return *cf.Value
 		}
 	}
@@ -64,16 +65,24 @@ type Client struct {
 	baseURL    string
 	token      string
 	httpClient *http.Client
+	atnFieldID int // AutomationTestName custom field ID (workspace-specific)
 }
 
-// NewClient creates a new Qase API client.
+// NewClient creates a new Qase API client using the default ATN field ID.
 func NewClient(token string) *Client {
+	return NewClientWithATNFieldID(token, AutomationTestNameFieldID)
+}
+
+// NewClientWithATNFieldID creates a new Qase API client with a custom ATN
+// field ID (for workspaces where the field ID differs from the default 15).
+func NewClientWithATNFieldID(token string, atnFieldID int) *Client {
 	return &Client{
 		baseURL: BaseURL,
 		token:   token,
 		httpClient: &http.Client{
 			Timeout: 30 * time.Second,
 		},
+		atnFieldID: atnFieldID,
 	}
 }
 
@@ -391,7 +400,7 @@ func (c *Client) GetAutomationNameMap(ctx context.Context, project string) (map[
 		}
 
 		for _, tc := range cases {
-			if name := tc.AutomationTestName(); name != "" {
+			if name := tc.AutomationTestName(c.atnFieldID); name != "" {
 				nameToID[name] = tc.ID
 			} else {
 				// Fallback: index by title so schema-only lookups work too.

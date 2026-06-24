@@ -10,6 +10,31 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+// MCP tool names.
+const (
+	MCPToolCreateRun    = "qase_create_run"
+	MCPToolDeleteRun    = "qase_delete_run"
+	MCPToolCompleteRun  = "qase_complete_run"
+	MCPToolCreateDefect = "qase_create_defect"
+	MCPToolDeleteDefect = "qase_delete_defect"
+)
+
+// MCP argument key names.
+const (
+	MCPArgCode         = "code"
+	MCPArgID           = "id"
+	MCPArgTitle        = "title"
+	MCPArgDescription  = "description"
+	MCPArgSeverity     = "severity"
+	MCPArgActualResult = "actual_result"
+)
+
+// MCP client identity.
+const (
+	mcpClientName    = "agentic-qa"
+	mcpClientVersion = "v1.0.0"
+)
+
 // MCPClient wraps the Qase MCP server for use by the agentic pipeline.
 type MCPClient struct {
 	serverURL string
@@ -39,8 +64,8 @@ func (m *MCPClient) CallTool(ctx context.Context, toolName string, args map[stri
 	}
 
 	client := mcp.NewClient(&mcp.Implementation{
-		Name:    "agentic-qa",
-		Version: "v1.0.0",
+		Name:    mcpClientName,
+		Version: mcpClientVersion,
 	}, nil)
 
 	session, err := client.Connect(ctx, transport, nil)
@@ -114,10 +139,10 @@ func extractText(result *mcp.CallToolResult) string {
 
 // CreateTestRun creates a test run via the MCP server.
 func (m *MCPClient) CreateTestRun(ctx context.Context, project, title, description string) (int, error) {
-	result, err := m.CallTool(ctx, "qase_create_run", map[string]any{
-		"code":        project,
-		"title":       title,
-		"description": description,
+	result, err := m.CallTool(ctx, MCPToolCreateRun, map[string]any{
+		MCPArgCode:        project,
+		MCPArgTitle:       title,
+		MCPArgDescription: description,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("creating test run via MCP: %w", err)
@@ -136,9 +161,9 @@ func (m *MCPClient) CreateTestRun(ctx context.Context, project, title, descripti
 
 // DeleteTestRun deletes a test run via the MCP server.
 func (m *MCPClient) DeleteTestRun(ctx context.Context, project string, runID int) error {
-	_, err := m.CallTool(ctx, "qase_delete_run", map[string]any{
-		"code": project,
-		"id":   runID,
+	_, err := m.CallTool(ctx, MCPToolDeleteRun, map[string]any{
+		MCPArgCode: project,
+		MCPArgID:   runID,
 	})
 	if err != nil {
 		return fmt.Errorf("deleting test run via MCP: %w", err)
@@ -148,11 +173,11 @@ func (m *MCPClient) DeleteTestRun(ctx context.Context, project string, runID int
 
 // CreateDefect creates a defect via the MCP server.
 func (m *MCPClient) CreateDefect(ctx context.Context, project, title, severity, actualResult string) (int, error) {
-	result, err := m.CallTool(ctx, "qase_create_defect", map[string]any{
-		"code":          project,
-		"title":         title,
-		"severity":      severity,
-		"actual_result": actualResult,
+	result, err := m.CallTool(ctx, MCPToolCreateDefect, map[string]any{
+		MCPArgCode:         project,
+		MCPArgTitle:        title,
+		MCPArgSeverity:     severity,
+		MCPArgActualResult: actualResult,
 	})
 	if err != nil {
 		return 0, fmt.Errorf("creating defect via MCP: %w", err)
@@ -171,9 +196,9 @@ func (m *MCPClient) CreateDefect(ctx context.Context, project, title, severity, 
 
 // DeleteDefect deletes a defect via the MCP server.
 func (m *MCPClient) DeleteDefect(ctx context.Context, project string, defectID int) error {
-	_, err := m.CallTool(ctx, "qase_delete_defect", map[string]any{
-		"code": project,
-		"id":   defectID,
+	_, err := m.CallTool(ctx, MCPToolDeleteDefect, map[string]any{
+		MCPArgCode: project,
+		MCPArgID:   defectID,
 	})
 	if err != nil {
 		return fmt.Errorf("deleting defect via MCP: %w", err)

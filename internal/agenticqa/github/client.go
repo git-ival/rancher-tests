@@ -218,11 +218,13 @@ func (c *Client) ClosePR(ctx context.Context, owner, repo string, number int) er
 	return nil
 }
 
-// AssignCopilot assigns the copilot-swe-agent user to an issue.
-func (c *Client) AssignCopilot(ctx context.Context, owner, repo string, issueNumber int, copilotToken string) error {
+// AssignCopilot assigns a coding-agent bot user to an issue.
+// username is the GitHub login of the bot (e.g. "copilot-swe-agent"), taken
+// from PipelineEnv.CopilotUsername so it is not hardcoded in the binary.
+func (c *Client) AssignCopilot(ctx context.Context, owner, repo string, issueNumber int, copilotToken, username string) error {
 	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/issues/%d/assignees", owner, repo, issueNumber)
 
-	payload := `{"assignees":["copilot-swe-agent"]}`
+	payload := fmt.Sprintf(`{"assignees":[%q]}`, username)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("creating assign request: %w", err)
@@ -241,6 +243,6 @@ func (c *Client) AssignCopilot(ctx context.Context, owner, repo string, issueNum
 		return fmt.Errorf("assign copilot returned status %d", resp.StatusCode)
 	}
 
-	logrus.Infof("AssignCopilot: assigned copilot-swe-agent to %s/%s#%d", owner, repo, issueNumber)
+	logrus.Infof("AssignCopilot: assigned %s to %s/%s#%d", username, owner, repo, issueNumber)
 	return nil
 }
