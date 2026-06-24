@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/rancher/tests/internal/agenticqa/envconfig"
 	"github.com/rancher/tests/internal/agenticqa/llm"
 	"github.com/sirupsen/logrus"
 )
@@ -25,11 +26,17 @@ type Classification struct {
 // Classifier classifies test failures using pattern matching and LLM.
 type Classifier struct {
 	llmClient *llm.Client
+	env       *envconfig.PipelineEnv
 }
 
 // NewClassifier creates a classifier with an optional LLM client for fallback.
-func NewClassifier(llmClient *llm.Client) *Classifier {
-	return &Classifier{llmClient: llmClient}
+// env provides the organisation-specific configuration (repo slugs, project
+// display name, etc.).  If nil, envconfig.Generate() defaults are used.
+func NewClassifier(llmClient *llm.Client, env *envconfig.PipelineEnv) *Classifier {
+	if env == nil {
+		env = envconfig.Generate()
+	}
+	return &Classifier{llmClient: llmClient, env: env}
 }
 
 // ClassifyByPattern attempts to classify an error using regex patterns only.
@@ -61,7 +68,7 @@ func (c *Classifier) ClassifyByPattern(testName, pkg, errorText string) *Classif
 				Confidence:      rule.Confidence,
 				Evidence:        rule.Description,
 				PatternMatched:  rule.Pattern.String(),
-				RecommendedRepo: "rancher/tests",
+				RecommendedRepo: c.env.TestsRepo,
 			}
 		}
 	}
@@ -77,7 +84,7 @@ func (c *Classifier) ClassifyByPattern(testName, pkg, errorText string) *Classif
 				Confidence:      rule.Confidence,
 				Evidence:        rule.Description,
 				PatternMatched:  rule.Pattern.String(),
-				RecommendedRepo: "rancher/rancher",
+				RecommendedRepo: c.env.ProductRepo,
 			}
 		}
 	}
@@ -94,15 +101,18 @@ type llmClassification struct {
 	Action         string `json:"recommended_action"`
 }
 
-const llmSystemPrompt = `You are a test failure triage classifier for the Rancher Kubernetes management platform.
+// buildLLMSystemPrompt returns the triage system prompt, injecting the
+// project display name from the active PipelineEnv.
+func (c *Classifier) buildLLMSystemPrompt() string {
+	return fmt.Sprintf(`You are a test failure triage classifier for the %s.
 
 Classify the following test failure into exactly one of these categories:
 
-1. "product_defect" — The Rancher product (or one of its components) has a bug. Examples:
+1. "product_defect" — The product (or one of its components) has a bug. Examples:
    - API returning unexpected errors (500s, incorrect responses)
    - Resources not being created/updated/deleted correctly
    - RBAC or admission webhook misbehavior
-   - Cluster provisioning failures due to Rancher logic errors
+   - Cluster provisioning failures due to product logic errors
 
 2. "test_defect" — The test code itself is broken. Examples:
    - Nil pointer dereferences or index out of range in test helpers
@@ -121,7 +131,8 @@ Respond with a JSON object containing:
 - "confidence": "high", "medium", or "low"
 - "evidence": a brief explanation of why this classification was chosen
 - "recommended_severity": "critical", "major", "minor", or "trivial"
-- "recommended_action": a short recommended next step`
+- "recommended_action": a short recommended next step`, c.env.ProjectDisplayName)
+}
 
 // ClassifyWithLLM uses the LLM to classify a failure that didn't match patterns.
 func (c *Classifier) ClassifyWithLLM(ctx context.Context, testName, pkg, errorText, stackTrace string) (*Classification, error) {
@@ -135,7 +146,7 @@ func (c *Classifier) ClassifyWithLLM(ctx context.Context, testName, pkg, errorTe
 	}
 
 	var result llmClassification
-	if err := c.llmClient.CompleteJSON(ctx, llmSystemPrompt, userMessage, 1024, &result); err != nil {
+	if err := c.llmClient.CompleteJSON(ctx, c.buildLLMSystemPrompt(), userMessage, 1024, &result); err != nil {
 		return nil, fmt.Errorf("triage: LLM classification failed: %w", err)
 	}
 
@@ -145,7 +156,7 @@ func (c *Classifier) ClassifyWithLLM(ctx context.Context, testName, pkg, errorTe
 		"confidence":     result.Confidence,
 	}).Debug("LLM triage classification complete")
 
-	repo := repoForCategory(result.Classification)
+	repo := c.env.RepoForCategory(result.Classification)
 
 	return &Classification{
 		TestName:            testName,
@@ -160,14 +171,4 @@ func (c *Classifier) ClassifyWithLLM(ctx context.Context, testName, pkg, errorTe
 	}, nil
 }
 
-// repoForCategory maps a classification category to the recommended repository.
-func repoForCategory(category string) string {
-	switch category {
-	case ClassProductDefect:
-		return "rancher/rancher"
-	case ClassTestDefect:
-		return "rancher/tests"
-	default:
-		return ""
-	}
-}
+

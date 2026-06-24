@@ -58,7 +58,15 @@ type rawCase struct {
 
 // LoadDir walks basePath recursively and parses every file whose name contains
 // "_schemas.yaml". It returns a flat slice of CaseMeta for all cases found.
-func LoadDir(basePath string) ([]CaseMeta, error) {
+//
+// atnFieldKey is the YAML map key used to look up the AutomationTestName value
+// inside custom_field entries (e.g. "15" for Qase field ID 15).  Pass
+// AutomationTestNameFieldKey to use the compiled-in default, or supply the
+// string form of PipelineEnv.QaseATNFieldID for runtime configuration.
+func LoadDir(basePath, atnFieldKey string) ([]CaseMeta, error) {
+	if atnFieldKey == "" {
+		atnFieldKey = AutomationTestNameFieldKey
+	}
 	var all []CaseMeta
 
 	err := filepath.Walk(basePath, func(path string, info os.FileInfo, err error) error {
@@ -72,7 +80,7 @@ func LoadDir(basePath string) ([]CaseMeta, error) {
 			return nil
 		}
 
-		cases, parseErr := parseFile(path, basePath)
+		cases, parseErr := parseFile(path, basePath, atnFieldKey)
 		if parseErr != nil {
 			logrus.Warnf("schema: skipping %s: %v", path, parseErr)
 			return nil // non-fatal; keep walking
@@ -131,7 +139,7 @@ func BuildAutomationIndex(cases []CaseMeta) map[string][]CaseMeta {
 }
 
 // parseFile reads and parses a single schema YAML file.
-func parseFile(path, basePath string) ([]CaseMeta, error) {
+func parseFile(path, basePath, atnFieldKey string) ([]CaseMeta, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -150,7 +158,7 @@ func parseFile(path, basePath string) ([]CaseMeta, error) {
 	var cases []CaseMeta
 	for _, suite := range suites {
 		for _, rc := range suite.Cases {
-			automationName := rc.CustomField[AutomationTestNameFieldKey]
+			automationName := rc.CustomField[atnFieldKey]
 			cases = append(cases, CaseMeta{
 				AutomationTestName: automationName,
 				Title:              rc.Title,

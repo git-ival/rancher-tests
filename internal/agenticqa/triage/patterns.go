@@ -7,6 +7,8 @@ const (
 	ClassProductDefect     = "product_defect"
 	ClassTestDefect        = "test_defect"
 	ClassConfigEnvironment = "config_environment"
+	ClassPassed            = "passed"
+	ClassUnknown           = "unknown"
 )
 
 // PatternRule maps a regex to a classification.
