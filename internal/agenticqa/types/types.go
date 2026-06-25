@@ -102,6 +102,7 @@ const (
 	ClassProductDefect     TriageClassification = "product_defect"
 	ClassTestDefect        TriageClassification = "test_defect"
 	ClassConfigEnvironment TriageClassification = "config_environment"
+	ClassUnknown           TriageClassification = "unknown"
 )
 
 type TriageConfidence string

@@ -88,7 +88,7 @@ var analyzeCmd = &cobra.Command{
 		for _, job := range completedJobs.Completed {
 			result.Passed = append(result.Passed, types.TriageEntry{
 				TestName:       job.JobName,
-				Classification: triage.ClassPassed,
+				Classification: types.ClassPassed,
 			})
 		}
 
@@ -98,11 +98,11 @@ var analyzeCmd = &cobra.Command{
 			entry := classifyByPattern(job, allPatterns)
 			if entry != nil {
 				switch entry.Classification {
-				case triage.ClassProductDefect:
+				case types.ClassProductDefect:
 					result.ProductDefects = append(result.ProductDefects, *entry)
-				case triage.ClassTestDefect:
+				case types.ClassTestDefect:
 					result.TestDefects = append(result.TestDefects, *entry)
-				case triage.ClassConfigEnvironment:
+				case types.ClassConfigEnvironment:
 					result.ConfigIssues = append(result.ConfigIssues, *entry)
 				}
 			} else {
@@ -119,8 +119,8 @@ var analyzeCmd = &cobra.Command{
 				for _, job := range llmNeeded {
 					result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
 						TestName:       job.JobName,
-						Classification: triage.ClassUnknown,
-						Confidence:     "low",
+						Classification: types.ClassUnknown,
+						Confidence:     types.ConfidenceLow,
 						Evidence:       "LLM client creation failed",
 					})
 				}
@@ -138,19 +138,19 @@ var analyzeCmd = &cobra.Command{
 						logrus.Warnf("LLM triage failed for %s: %v", job.JobName, err)
 						triageEntry = types.TriageEntry{
 							TestName:       job.JobName,
-							Classification: triage.ClassUnknown,
-							Confidence:     "low",
+							Classification: types.ClassUnknown,
+							Confidence:     types.ConfidenceLow,
 							Evidence:       fmt.Sprintf("LLM triage failed: %v", err),
 						}
 					}
 					triageEntry.TestName = job.JobName
 
 					switch triageEntry.Classification {
-					case triage.ClassProductDefect:
+					case types.ClassProductDefect:
 						result.ProductDefects = append(result.ProductDefects, triageEntry)
-					case triage.ClassTestDefect:
+					case types.ClassTestDefect:
 						result.TestDefects = append(result.TestDefects, triageEntry)
-					case triage.ClassConfigEnvironment:
+					case types.ClassConfigEnvironment:
 						result.ConfigIssues = append(result.ConfigIssues, triageEntry)
 					default:
 						result.ProductDefects = append(result.ProductDefects, triageEntry)

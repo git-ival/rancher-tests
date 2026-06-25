@@ -11,7 +11,6 @@ import (
 	ghclient "github.com/rancher/tests/internal/agenticqa/github"
 	"github.com/rancher/tests/internal/agenticqa/qase"
 	"github.com/rancher/tests/internal/agenticqa/state"
-	"github.com/rancher/tests/internal/agenticqa/triage"
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
@@ -96,7 +95,7 @@ var defectsCmd = &cobra.Command{
 		for _, defect := range allDefects {
 			// Determine target repo
 			targetRepo := defectsProductRepo
-			if defect.Classification == triage.ClassTestDefect {
+			if defect.Classification == types.ClassTestDefect {
 				targetRepo = defectsTestsRepo
 			}
 
