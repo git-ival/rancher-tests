@@ -29,56 +29,40 @@ var (
 
 const (
 	identifiedTestsFlag    = "identified-tests"
-	triggerMappingFileFlag = "trigger-mapping"
 	triggerQaseRunNameFlag = "qase-run-name"
 	triggerTestTimeoutFlag = "test-timeout"
-	triggerPRNumberFlag    = "pr-number"
-	triggerRepoFlag        = "repo"
-	triggerOutputFileFlag  = "output-file"
-	triggerJenkinsURLFlag  = "jenkins-url"
 )
 
 func init() {
 	f := triggerCmd.Flags()
 	f.StringVar(&triggerIdentifiedTests, identifiedTestsFlag, "", "Path to identified_tests.json (required)")
-	f.StringVar(&triggerMappingFile, triggerMappingFileFlag, "", "Path to jenkins_trigger_mapping.json (required)")
+	f.StringVar(&triggerMappingFile, triggerMappingFlag, "", "Path to jenkins_trigger_mapping.json (required)")
 	f.StringVar(&triggerQaseRunName, triggerQaseRunNameFlag, "", "Qase test run name")
 	f.StringVar(&triggerTestTimeout, triggerTestTimeoutFlag, "3h", "Test timeout duration")
-	f.IntVar(&triggerPRNumber, triggerPRNumberFlag, 0, "Pull request number")
-	f.StringVar(&triggerRepo, triggerRepoFlag, "rancher/rancher", "Repository (owner/repo)")
-	f.StringVar(&triggerOutputFile, triggerOutputFileFlag, "", "Path to write triggered_jobs.json (required)")
-	f.StringVar(&triggerJenkinsURL, triggerJenkinsURLFlag, "", "Jenkins server URL")
+	f.IntVar(&triggerPRNumber, prNumberFlag, 0, "Pull request number")
+	f.StringVar(&triggerRepo, repoFlag, defaultProductRepo, "Repository (owner/repo)")
+	f.StringVar(&triggerOutputFile, outputFileFlag, "", "Path to write triggered_jobs.json (required)")
+	f.StringVar(&triggerJenkinsURL, jenkinsURLFlag, "", "Jenkins server URL")
 
 	_ = triggerCmd.MarkFlagRequired(identifiedTestsFlag)
-	_ = triggerCmd.MarkFlagRequired(triggerMappingFileFlag)
-	_ = triggerCmd.MarkFlagRequired(triggerOutputFileFlag)
+	_ = triggerCmd.MarkFlagRequired(triggerMappingFlag)
+	_ = triggerCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(triggerCmd)
 }
 
-// createQaseRun creates a Qase test run, trying MCP first then REST.
-// Returns 0 and a non-nil error if both attempts fail.
+// createQaseRun creates a Qase test run using the REST API and explicit case
+// IDs from the generated mapping output. This is intentionally strict: we do
+// not fall back to MCP or include-all-cases behavior.
 func createQaseRun(ctx context.Context, project, name, description string, caseIDs []int) (int, error) {
 	qaseToken := os.Getenv(qaseApiTokenEnvVar)
-	if qaseToken != "" {
-		return qase.NewClient(qaseToken).CreateTestRunWithCases(ctx, project, name, description, caseIDs)
+	if qaseToken == "" {
+		return 0, fmt.Errorf("%s is required for deterministic trigger mode", qaseApiTokenEnvVar)
 	}
-
-	// MCP fallback path when token is not available.
-	mcpClient := qase.NewMCPClient(mcpURL)
-	if !mcpClient.IsConfigured() {
-		return 0, fmt.Errorf("%s not set and MCP not configured", qaseApiTokenEnvVar)
+	if len(caseIDs) == 0 {
+		return 0, fmt.Errorf("refusing to create Qase run without explicit case IDs")
 	}
-	id, err := mcpClient.CreateTestRun(ctx, project, name, description)
-	if err != nil {
-		return 0, err
-	}
-	if len(caseIDs) > 0 {
-		logrus.Warnf("Qase MCP run created for %s without explicit case assignment; configure %s to attach %d selected cases", project, qaseApiTokenEnvVar, len(caseIDs))
-	} else {
-		logrus.Warnf("Qase MCP run created for %s without include_all_cases control; configure %s for deterministic case population", project, qaseApiTokenEnvVar)
-	}
-	return id, nil
+	return qase.NewClient(qaseToken).CreateTestRunWithCases(ctx, project, name, description, caseIDs)
 }
 
 func collectProjectCaseIDs(identified types.IdentifiedTests, project string) []int {
@@ -257,8 +241,7 @@ var triggerCmd = &cobra.Command{
 				caseIDs := collectProjectCaseIDs(identified, project)
 
 				if len(caseIDs) == 0 {
-					logrus.Warnf("No Qase case IDs for project %s — skipping run creation (tests may belong to other projects)", project)
-					continue
+					return fmt.Errorf("no mapped Qase case IDs for project %s; regenerate mapping and rerun identify", project)
 				}
 
 				id, err := createQaseRun(ctx, project, runName, desc, caseIDs)
@@ -275,44 +258,19 @@ var triggerCmd = &cobra.Command{
 					}
 				}
 			}
-
-			// Fallback: if identified.QaseProjects was empty or all creations failed,
-			// create a single run in the --qase-project flag value (original behavior).
 			if len(runMap) == 0 {
-				fallbackProject := qaseProject
-				if fallbackProject == "" && len(identified.QaseProjects) > 0 {
-					fallbackProject = identified.QaseProjects[0]
-					logrus.Infof("--qase-project not set; using first identified project: %s", fallbackProject)
-				}
-				if fallbackProject == "" {
-					logrus.Warn("No Qase project available for fallback run creation — skipping Qase tracking")
-				} else {
-					logrus.Warn("No per-project Qase runs created; falling back to single run")
-					fallbackDesc := fmt.Sprintf("Automated run for %s#%d", triggerRepo, effectivePRNumber)
-					id, err := createQaseRun(ctx, fallbackProject, baseRunName, fallbackDesc, nil)
-					if err != nil {
-						logrus.Errorf("Fallback Qase run creation also failed: %v", err)
-					} else {
-						logrus.Infof("Created fallback Qase run %d in project %s", id, fallbackProject)
-						runMap[fallbackProject] = id
-						if stateFile != "" {
-							if trackErr := state.NewTracker(stateFile).AddQaseRun(fallbackProject, id); trackErr != nil {
-								logrus.Warnf("Failed to track fallback Qase run: %v", trackErr)
-							}
-						}
-					}
-				}
+				return fmt.Errorf("no Qase runs created; mapping-driven trigger requires explicit project case mappings")
 			}
 		}
 
 		// Trigger Jenkins jobs
 		jenkinsURL := triggerJenkinsURL
 		if jenkinsURL == "" {
-			jenkinsURL = os.Getenv("JENKINS_URL")
+			jenkinsURL = os.Getenv(jenkinsURLEnvVar)
 		}
 
-		jenkinsUser := os.Getenv("JENKINS_USER")
-		jenkinsToken := os.Getenv("JENKINS_TOKEN")
+		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 
 		var triggeredJobs []types.TriggeredJob
 
@@ -321,18 +279,18 @@ var triggerCmd = &cobra.Command{
 
 			for _, job := range jobsToTrigger {
 				params := map[string]string{
-					"TIMEOUT": triggerTestTimeout,
+					jenkinsParamTimeout: triggerTestTimeout,
 				}
 				if effectivePRNumber > 0 {
-					params["PR_NUMBER"] = fmt.Sprintf("%d", effectivePRNumber)
+					params[jenkinsParamPRNumber] = fmt.Sprintf("%d", effectivePRNumber)
 				}
 				jobProject := lookupJobQaseProject(triggerMapping, job)
 				if runID, ok := runMap[jobProject]; ok {
-					params["QASE_RUN_ID"] = fmt.Sprintf("%d", runID)
+					params[jenkinsParamQaseRunID] = fmt.Sprintf("%d", runID)
 				} else if len(runMap) > 0 {
 					// Job's declared project has no run; use the first available run.
 					for _, id := range runMap {
-						params["QASE_RUN_ID"] = fmt.Sprintf("%d", id)
+						params[jenkinsParamQaseRunID] = fmt.Sprintf("%d", id)
 						break
 					}
 				}
@@ -351,7 +309,7 @@ var triggerCmd = &cobra.Command{
 					logrus.Errorf("Failed to trigger %s/%s: %v", folder, jobName, err)
 					triggeredJobs = append(triggeredJobs, types.TriggeredJob{
 						JobName: job,
-						Status:  "trigger_failed",
+						Status:  jobStatusTriggerFailed,
 					})
 					continue
 				}
@@ -360,7 +318,7 @@ var triggerCmd = &cobra.Command{
 					JobName:    job,
 					QueueID:    &queueID,
 					Parameters: params,
-					Status:     "queued",
+					Status:     jobStatusQueued,
 				})
 			}
 		} else if localTest {
@@ -368,7 +326,7 @@ var triggerCmd = &cobra.Command{
 			for _, job := range jobsToTrigger {
 				triggeredJobs = append(triggeredJobs, types.TriggeredJob{
 					JobName: job,
-					Status:  "local_test",
+					Status:  jobStatusLocalTest,
 				})
 			}
 		} else if dryRun {
@@ -376,7 +334,7 @@ var triggerCmd = &cobra.Command{
 			for _, job := range jobsToTrigger {
 				triggeredJobs = append(triggeredJobs, types.TriggeredJob{
 					JobName: job,
-					Status:  "dry_run",
+					Status:  jobStatusDryRun,
 				})
 			}
 		}

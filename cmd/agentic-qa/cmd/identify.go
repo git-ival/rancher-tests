@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	ghclient "github.com/rancher/tests/internal/agenticqa/github"
-	"github.com/rancher/tests/internal/agenticqa/qase"
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
@@ -21,31 +19,23 @@ var (
 	identifyMappingFile           string
 	identifyOutputFile            string
 	identifyAdditionalContextFile string
-	identifyQaseProjects          []string
 )
 
 const (
-	identifyPRNumberFlag              = "pr-number"
-	identifyRepoFlag                  = "repo"
-	identifyMappingFileFlag           = "mapping-file"
-	identifyOutputFileFlag            = "output-file"
-	identifyAdditionalContextFileFlag = "additional-context-file"
-	identifyQaseProjectsFlag          = "qase-projects"
+	identifyMappingFileFlag = "mapping-file"
 )
 
 func init() {
 	f := identifyCmd.Flags()
-	f.IntVar(&identifyPRNumber, identifyPRNumberFlag, 0, "Pull request number (required)")
-	f.StringVar(&identifyRepo, identifyRepoFlag, "rancher/rancher", "Repository (owner/repo)")
+	f.IntVar(&identifyPRNumber, prNumberFlag, 0, "Pull request number (required)")
+	f.StringVar(&identifyRepo, repoFlag, defaultProductRepo, "Repository (owner/repo)")
 	f.StringVar(&identifyMappingFile, identifyMappingFileFlag, "", "Path to feature_test_mapping.json (required)")
-	f.StringVar(&identifyOutputFile, identifyOutputFileFlag, "", "Path to write identified_tests.json (required)")
-	f.StringVar(&identifyAdditionalContextFile, identifyAdditionalContextFileFlag, "", "Path to additional context file (optional)")
-	f.StringSliceVar(&identifyQaseProjects, identifyQaseProjectsFlag, []string{"RANCHERINT", "RRT", "RM", "K3SRKE2"},
-		"Qase project codes to scan for title-based fallback matching (comma-separated)")
+	f.StringVar(&identifyOutputFile, outputFileFlag, "", "Path to write identified_tests.json (required)")
+	f.StringVar(&identifyAdditionalContextFile, additionalContextFlag, "", "Path to additional context file (optional)")
 
-	_ = identifyCmd.MarkFlagRequired(identifyPRNumberFlag)
+	_ = identifyCmd.MarkFlagRequired(prNumberFlag)
 	_ = identifyCmd.MarkFlagRequired(identifyMappingFileFlag)
-	_ = identifyCmd.MarkFlagRequired(identifyOutputFileFlag)
+	_ = identifyCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(identifyCmd)
 }
@@ -133,15 +123,14 @@ var identifyCmd = &cobra.Command{
 	Use:   "identify",
 	Short: "Identify tests relevant to a PR",
 	Long: `Analyzes a PR diff against a feature-test mapping to identify relevant tests
-using an LLM. Validates identified test cases against Qase to confirm they exist.
-Tests without qase_cases in the mapping are logged at WARN level and processing
-continues with the remaining tests.`,
+using an LLM. Enriches identified tests only from the generated mapping file.
+If an identified test has no mapped qase_cases, identify fails with an error.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
 
-		ghToken := os.Getenv("GITHUB_TOKEN")
+		ghToken := os.Getenv(githubTokenEnvVar)
 		if ghToken == "" {
-			return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+			return fmt.Errorf("%s environment variable is required", githubTokenEnvVar)
 		}
 
 		gh := ghclient.NewClient(ghToken)
@@ -209,10 +198,9 @@ continues with the remaining tests.`,
 		result.PRTitle = prInfo.Title
 		result.ChangedFiles = files
 
-		// Enrich identified tests with qase_cases from the pre-generated mapping
-		// and validate them against the Qase API.
-		if err := enrichAndValidateQaseCases(ctx, &result, &mapping, identifyQaseProjects); err != nil {
-			return fmt.Errorf("validating Qase cases: %w", err)
+		// Enrich identified tests using only qase_cases from the pre-generated mapping.
+		if err := enrichQaseCasesFromMapping(&result, &mapping); err != nil {
+			return fmt.Errorf("enriching Qase cases from mapping: %w", err)
 		}
 
 		result.QaseProjects, result.TestsByProject = consolidateQaseProjects(result.Tests)
@@ -230,7 +218,8 @@ continues with the remaining tests.`,
 }
 
 func buildIdentifySystemPrompt(mappingJSON string) string {
-	return fmt.Sprintf(`You are a test selection expert for the Rancher project.
+	env := activePipelineEnv()
+	return fmt.Sprintf(`You are a test selection expert for the %s project.
 Given a PR diff and a feature-to-test mapping, identify which tests should be run.
 
 The feature_test_mapping.json maps feature areas to test files, suites, and tags:
@@ -243,7 +232,7 @@ Respond with a JSON object matching this schema:
   "recommended_tags": ["string"],
   "recommended_jobs": ["string"],
   "confidence": "high|medium|low"
-}`, mappingJSON)
+}`, env.ProjectDisplayName, mappingJSON)
 }
 
 func buildIdentifyUserMessage(prInfo *ghclient.PRInfo, diff string, files []string, additionalContext string) string {
@@ -273,172 +262,54 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "\n... (truncated)"
 }
 
-// enrichAndValidateQaseCases does two things:
-//  1. For each identified test, looks up its qase_cases from the pre-generated
-//     feature_test_mapping.json (keyed by file path). Populates QaseCaseIDs and
-//     QaseProjects on the TestEntry.
-//  2. Validates the case IDs actually exist in Qase by querying the API for
-//     each relevant project. Cases that don't exist are logged and skipped.
+// enrichQaseCasesFromMapping enriches identified tests using only qase_cases
+// from the pre-generated feature_test_mapping.json. No live Qase API fallback
+// or validation is performed here.
 //
-// Tests with no qase_cases in the mapping are logged at WARN level and
-// processing continues — they will not have QaseCaseIDs populated but will
-// still appear in the identified tests output for Jenkins triggering.
-func enrichAndValidateQaseCases(ctx context.Context, result *types.IdentifiedTests, mapping *types.FeatureTestMapping, fallbackProjects []string) error {
-	qaseToken := os.Getenv("QASE_API_TOKEN")
-	if qaseToken == "" {
-		return fmt.Errorf("QASE_API_TOKEN environment variable is required")
-	}
-
+// This is intentionally strict: every identified test must have mapped case
+// IDs, otherwise identify returns an error so trigger can remain mapping-only.
+func enrichQaseCasesFromMapping(result *types.IdentifiedTests, mapping *types.FeatureTestMapping) error {
 	// Build an index: file path → TestFile from the mapping.
 	fileIndex := buildFileIndex(mapping)
 
-	// First pass: enrich tests with qase_cases from the mapping.
-	projectSet := map[string]struct{}{}
-	testsWithCases := 0
-	testsWithoutCases := 0
+	missing := 0
 
 	for i := range result.Tests {
 		t := &result.Tests[i]
 		tf, found := fileIndex[t.File]
 		if !found {
-			logrus.Warnf("Test file %q not found in feature_test_mapping.json — no Qase cases mapped", t.File)
-			testsWithoutCases++
+			logrus.Errorf("Test file %q not found in feature_test_mapping.json", t.File)
+			missing++
 			continue
 		}
 
 		if len(tf.QaseCases) == 0 {
-			logrus.Warnf("Test file %q has no qase_cases in the mapping — will proceed without Qase tracking", t.File)
-			testsWithoutCases++
+			logrus.Errorf("Test file %q has no qase_cases in the mapping", t.File)
+			missing++
 			continue
 		}
 
-		// Enrich the TestEntry with projects and case IDs from the mapping.
-		if len(t.QaseProjects) == 0 {
-			t.QaseProjects = tf.QaseProjects
-		}
+		// Enrich the TestEntry with projects and case IDs from the mapping only.
+		t.QaseProjects = append([]string(nil), tf.QaseProjects...)
+		sort.Strings(t.QaseProjects)
+		t.QaseCaseIDs = nil
+		t.QaseCasesByProject = nil
 		for _, c := range tf.QaseCases {
 			if c.ID > 0 {
 				t.QaseCaseIDs = append(t.QaseCaseIDs, c.ID)
 			}
 		}
-		for _, p := range tf.QaseProjects {
-			projectSet[p] = struct{}{}
-		}
-		testsWithCases++
-	}
-
-	logrus.Infof("Enriched %d tests with Qase cases; %d tests have no Qase mapping (WARN)",
-		testsWithCases, testsWithoutCases)
-
-	qaseClient := qase.NewClient(qaseToken)
-
-	// Title fallback: for tests that still have no QaseCaseIDs, try matching
-	// their function names against Qase case titles across all fallback projects.
-	if testsWithoutCases > 0 && len(fallbackProjects) > 0 {
-		titleMaps := map[string]map[string]int{} // lazy-loaded per project
-		fallbackResolved := 0
-
-		for i := range result.Tests {
-			t := &result.Tests[i]
-			if len(t.QaseCaseIDs) > 0 || len(t.Functions) == 0 {
-				continue
-			}
-
-			candidates := buildCandidateNames(t)
-			for _, name := range candidates {
-				for _, project := range fallbackProjects {
-					tMap, ok := titleMaps[project]
-					if !ok {
-						logrus.Infof("Fetching Qase title map for project %s (title fallback)...", project)
-						m, err := qaseClient.GetTitleMap(ctx, project)
-						if err != nil {
-							logrus.Warnf("Failed to fetch title map for project %s: %v", project, err)
-							titleMaps[project] = map[string]int{}
-							continue
-						}
-						titleMaps[project] = m
-						tMap = m
-						logrus.Infof("  %s: %d case titles indexed", project, len(m))
-					}
-					if caseID, found := tMap[name]; found {
-						t.QaseCaseIDs = append(t.QaseCaseIDs, caseID)
-						t.QaseProjects = appendUnique(t.QaseProjects, project)
-						projectSet[project] = struct{}{}
-						fallbackResolved++
-						break // first project match wins for this name
-					}
-				}
-			}
-			if len(t.QaseCaseIDs) > 0 {
-				sort.Strings(t.QaseProjects)
-				logrus.Infof("Title fallback matched %d cases for %s → projects %v",
-					len(t.QaseCaseIDs), t.File, t.QaseProjects)
-				testsWithCases++
-				testsWithoutCases--
-			}
-		}
-		logrus.Infof("Title fallback resolved %d additional case(s)", fallbackResolved)
-	}
-
-	// If no tests have case IDs after both passes, skip validation.
-	if testsWithCases == 0 {
-		logrus.Warn("No identified tests have Qase cases mapped — Qase validation skipped")
-		return nil
-	}
-
-	// Second pass: validate case IDs exist in Qase via API.
-	validCasesByProject := map[string]map[int]bool{}
-
-	for project := range projectSet {
-		logrus.Infof("Validating Qase cases for project %s...", project)
-		nameMap, err := qaseClient.GetAutomationNameMap(ctx, project)
-		if err != nil {
-			return fmt.Errorf("fetching Qase cases for project %s: %w", project, err)
-		}
-		// Build a set of valid case IDs from the API response.
-		validIDs := map[int]bool{}
-		for _, id := range nameMap {
-			validIDs[id] = true
-		}
-		validCasesByProject[project] = validIDs
-		logrus.Infof("  %s: %d valid cases in Qase", project, len(validIDs))
-	}
-
-	// Validate each test's case IDs against the API and assign per-project.
-	totalValidated := 0
-	totalInvalid := 0
-	for i := range result.Tests {
-		t := &result.Tests[i]
 		if len(t.QaseCaseIDs) == 0 {
-			continue
+			logrus.Errorf("Test file %q has qase_cases entries, but none include a valid ID", t.File)
+			missing++
 		}
-
-		var validIDs []int
-		casesByProject := map[string][]int{}
-
-		for _, caseID := range t.QaseCaseIDs {
-			confirmed := false
-			for _, project := range t.QaseProjects {
-				if validSet, ok := validCasesByProject[project]; ok {
-					if validSet[caseID] {
-						confirmed = true
-						validIDs = append(validIDs, caseID)
-						casesByProject[project] = append(casesByProject[project], caseID)
-						totalValidated++
-						break
-					}
-				}
-			}
-			if !confirmed {
-				logrus.Warnf("Qase case ID %d (file: %s) not found in any project — removing from test entry", caseID, t.File)
-				totalInvalid++
-			}
-		}
-		t.QaseCaseIDs = validIDs
-		t.QaseCasesByProject = casesByProject
 	}
 
-	logrus.Infof("Qase validation complete: %d cases confirmed, %d invalid/removed", totalValidated, totalInvalid)
+	if missing > 0 {
+		return fmt.Errorf("%d identified test(s) are missing deterministic qase_cases in %s; regenerate mapping with generate-feature-map", missing, identifyMappingFile)
+	}
+
+	logrus.Infof("Enriched %d identified tests with mapping-provided Qase case IDs", len(result.Tests))
 	return nil
 }
 
@@ -451,33 +322,4 @@ func buildFileIndex(mapping *types.FeatureTestMapping) map[string]types.TestFile
 		}
 	}
 	return idx
-}
-
-// buildCandidateNames returns the ordered list of automation name strings to
-// try when looking up a TestEntry in Qase maps.
-func buildCandidateNames(t *types.TestEntry) []string {
-	var names []string
-	seen := map[string]struct{}{}
-	add := func(s string) {
-		if s == "" {
-			return
-		}
-		if _, ok := seen[s]; ok {
-			return
-		}
-		seen[s] = struct{}{}
-		names = append(names, s)
-	}
-
-	// Most specific: Suite/Function combos (matches gotestsum output format).
-	for _, fn := range t.Functions {
-		if t.Suite != "" {
-			add(t.Suite + "/" + fn)
-		}
-		add(fn)
-	}
-	// Suite alone.
-	add(t.Suite)
-
-	return names
 }
