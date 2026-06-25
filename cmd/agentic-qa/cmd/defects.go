@@ -114,9 +114,9 @@ var defectsCmd = &cobra.Command{
 			if defectsAutoCreateIssue && !dryRun {
 				title := fmt.Sprintf("[Agentic QA] %s: %s", defect.Classification, defect.TestName)
 				body := buildIssueBody(defect, defectsPRNumber)
-				labels := []string{activePipelineEnv().AgenticQALabel, defect.Classification}
+				labels := []string{activePipelineEnv().AgenticQALabel, string(defect.Classification)}
 				if defect.RecommendedSeverity != "" {
-					labels = append(labels, defectSeverityPrefix+defect.RecommendedSeverity)
+					labels = append(labels, defectSeverityPrefix+string(defect.RecommendedSeverity))
 				}
 
 				if localTest {
@@ -138,7 +138,7 @@ var defectsCmd = &cobra.Command{
 				result.IssuesCreated = append(result.IssuesCreated, types.CreatedIssue{
 					URL:        issueURL,
 					Title:      title,
-					DefectType: defect.Classification,
+					DefectType: string(defect.Classification),
 				})
 
 				// Track in state
@@ -152,7 +152,7 @@ var defectsCmd = &cobra.Command{
 				}
 
 				// Create Qase defect
-				severity := defect.RecommendedSeverity
+				severity := string(defect.RecommendedSeverity)
 				if severity == "" {
 					severity = defectNormalSeverity // Qase API default severity
 				}

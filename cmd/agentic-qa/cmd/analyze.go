@@ -86,10 +86,10 @@ var analyzeCmd = &cobra.Command{
 
 		// Process passed tests
 		for _, job := range completedJobs.Completed {
-		result.Passed = append(result.Passed, types.TriageEntry{
-			TestName:       job.JobName,
-			Classification: triage.ClassPassed,
-		})
+			result.Passed = append(result.Passed, types.TriageEntry{
+				TestName:       job.JobName,
+				Classification: triage.ClassPassed,
+			})
 		}
 
 		// Process failed tests
@@ -117,12 +117,12 @@ var analyzeCmd = &cobra.Command{
 				logrus.Errorf("Failed to create LLM client for triage: %v", err)
 				// Add as unclassified
 				for _, job := range llmNeeded {
-			result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
-					TestName:       job.JobName,
-					Classification: triage.ClassUnknown,
-					Confidence:     "low",
-					Evidence:       "LLM client creation failed",
-				})
+					result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
+						TestName:       job.JobName,
+						Classification: triage.ClassUnknown,
+						Confidence:     "low",
+						Evidence:       "LLM client creation failed",
+					})
 				}
 			} else {
 				systemPrompt := buildTriageSystemPrompt(frameworkData, additionalContext)
@@ -136,12 +136,12 @@ var analyzeCmd = &cobra.Command{
 					var triageEntry types.TriageEntry
 					if err := llmClient.CompleteJSON(ctx, systemPrompt, userMsg, 2048, &triageEntry); err != nil {
 						logrus.Warnf("LLM triage failed for %s: %v", job.JobName, err)
-					triageEntry = types.TriageEntry{
-						TestName:       job.JobName,
-						Classification: triage.ClassUnknown,
-						Confidence:     "low",
-						Evidence:       fmt.Sprintf("LLM triage failed: %v", err),
-					}
+						triageEntry = types.TriageEntry{
+							TestName:       job.JobName,
+							Classification: triage.ClassUnknown,
+							Confidence:     "low",
+							Evidence:       fmt.Sprintf("LLM triage failed: %v", err),
+						}
 					}
 					triageEntry.TestName = job.JobName
 
@@ -179,8 +179,8 @@ func classifyByPattern(job types.CompletedJob, patterns []triage.PatternRule) *t
 		if p.Pattern.MatchString(searchText) {
 			return &types.TriageEntry{
 				TestName:       job.JobName,
-				Classification: p.Category,
-				Confidence:     p.Confidence,
+				Classification: types.TriageClassification(p.Category),
+				Confidence:     types.TriageConfidence(p.Confidence),
 				PatternMatched: p.Description,
 			}
 		}

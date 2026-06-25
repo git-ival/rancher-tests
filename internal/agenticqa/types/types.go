@@ -94,20 +94,51 @@ type TriageResults struct {
 	ConfigIssues   []TriageEntry `json:"config_issues"`
 }
 
+type TriageClassification string
+
+const (
+	// Classification values for triage results.
+	ClassPassed            TriageClassification = "passed"
+	ClassProductDefect     TriageClassification = "product_defect"
+	ClassTestDefect        TriageClassification = "test_defect"
+	ClassConfigEnvironment TriageClassification = "config_environment"
+)
+
+type TriageConfidence string
+
+const (
+	// Confidence values for triage results.
+	ConfidenceHigh   TriageConfidence = "high"
+	ConfidenceMedium TriageConfidence = "medium"
+	ConfidenceLow    TriageConfidence = "low"
+)
+
+type TriageSeverity string
+
+const (
+	// Severity values for triage results.
+	SeverityTrivial  TriageSeverity = "trivial"
+	SeverityMinor    TriageSeverity = "minor"
+	SeverityNormal   TriageSeverity = "normal"
+	SeverityMajor    TriageSeverity = "major"
+	SeverityCritical TriageSeverity = "critical"
+	SeverityBlocker  TriageSeverity = "blocker"
+)
+
 // TriageEntry describes a single test result after triage classification.
 type TriageEntry struct {
-	TestName            string `json:"test_name"`
-	Package             string `json:"package"`
-	Error               string `json:"error,omitempty"`
-	DurationMS          int    `json:"duration_ms,omitempty"`
-	Classification      string `json:"classification,omitempty"`
-	Confidence          string `json:"confidence,omitempty"`
-	Evidence            string `json:"evidence,omitempty"`
-	StackTrace          string `json:"stack_trace,omitempty"`
-	PatternMatched      string `json:"pattern_matched,omitempty"`
-	RecommendedRepo     string `json:"recommended_repo,omitempty"`
-	RecommendedSeverity string `json:"recommended_severity,omitempty"`
-	RecommendedAction   string `json:"recommended_action,omitempty"`
+	TestName            string               `json:"test_name"`
+	Package             string               `json:"package"`
+	Error               string               `json:"error,omitempty"`
+	DurationMS          int                  `json:"duration_ms,omitempty"`
+	Classification      TriageClassification `json:"classification,omitempty"`
+	Confidence          TriageConfidence     `json:"confidence,omitempty"`
+	Evidence            string               `json:"evidence,omitempty"`
+	StackTrace          string               `json:"stack_trace,omitempty"`
+	PatternMatched      string               `json:"pattern_matched,omitempty"`
+	RecommendedRepo     string               `json:"recommended_repo,omitempty"`
+	RecommendedSeverity TriageSeverity       `json:"recommended_severity,omitempty"`
+	RecommendedAction   string               `json:"recommended_action,omitempty"`
 }
 
 // DefectActions is the output of the "defects" step.
