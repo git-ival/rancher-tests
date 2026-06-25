@@ -15,6 +15,20 @@ import (
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
+const (
+	defectsProductRepoFlag      = "product-repo"
+	defectsAutoCreateIssuesFlag = "auto-create-issues"
+	defectsUseCopilotFlag       = "use-copilot"
+
+	defectSeverityPrefix   = "severity/"
+	defectNormalSeverity   = "normal"
+	defectMinorSeverity    = "minor"
+	defectMajorSeverity    = "major"
+	defectCriticalSeverity = "critical"
+	defectBlockerSeverity  = "blocker"
+	defectSeverityTrivial  = "trivial"
+)
+
 var (
 	defectsTriageResults   string
 	defectsPipelineConfig  string
@@ -29,18 +43,18 @@ var (
 
 func init() {
 	f := defectsCmd.Flags()
-	f.StringVar(&defectsTriageResults, "triage-results", "", "Path to triage_results.json (required)")
-	f.StringVar(&defectsPipelineConfig, "pipeline-config", "", "Path to pipeline config")
-	f.StringVar(&defectsProductRepo, "product-repo", "rancher/rancher", "Product repository (owner/repo)")
-	f.StringVar(&defectsTestsRepo, "tests-repo", "rancher/tests", "Tests repository (owner/repo)")
-	f.IntVar(&defectsPRNumber, "pr-number", 0, "Pull request number")
-	f.BoolVar(&defectsAutoCreateIssue, "auto-create-issues", false, "Automatically create GitHub issues")
-	f.BoolVar(&defectsAutoCreatePRs, "auto-create-prs", false, "Automatically create GitHub PRs")
-	f.BoolVar(&defectsUseCopilot, "use-copilot", true, "Use Copilot for fix generation")
-	f.StringVar(&defectsOutputFile, "output-file", "", "Path to write defect_actions.json (required)")
+	f.StringVar(&defectsTriageResults, triageResultsFlag, "", "Path to triage_results.json (required)")
+	f.StringVar(&defectsPipelineConfig, pipelineConfigFlag, "", "Path to pipeline config")
+	f.StringVar(&defectsProductRepo, defectsProductRepoFlag, defaultProductRepo, "Product repository (owner/repo)")
+	f.StringVar(&defectsTestsRepo, testsRepoFlag, defaultTestsRepo, "Tests repository (owner/repo)")
+	f.IntVar(&defectsPRNumber, prNumberFlag, 0, "Pull request number")
+	f.BoolVar(&defectsAutoCreateIssue, defectsAutoCreateIssuesFlag, false, "Automatically create GitHub issues")
+	f.BoolVar(&defectsAutoCreatePRs, autoCreatePRsFlag, false, "Automatically create GitHub PRs")
+	f.BoolVar(&defectsUseCopilot, defectsUseCopilotFlag, true, "Use Copilot for fix generation")
+	f.StringVar(&defectsOutputFile, outputFileFlag, "", "Path to write defect_actions.json (required)")
 
-	_ = defectsCmd.MarkFlagRequired("triage-results")
-	_ = defectsCmd.MarkFlagRequired("output-file")
+	_ = defectsCmd.MarkFlagRequired(triageResultsFlag)
+	_ = defectsCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(defectsCmd)
 }
@@ -57,9 +71,9 @@ var defectsCmd = &cobra.Command{
 			return fmt.Errorf("loading triage results: %w", err)
 		}
 
-		ghToken := os.Getenv("GITHUB_TOKEN")
+		ghToken := os.Getenv(githubTokenEnvVar)
 		if ghToken == "" {
-			return fmt.Errorf("GITHUB_TOKEN environment variable is required")
+			return fmt.Errorf("%s environment variable is required", githubTokenEnvVar)
 		}
 		gh := ghclient.NewClient(ghToken)
 
@@ -69,7 +83,7 @@ var defectsCmd = &cobra.Command{
 		}
 
 		mcpClient := qase.NewMCPClient(mcpURL)
-		qaseToken := os.Getenv("QASE_API_TOKEN")
+		qaseToken := os.Getenv(qaseApiTokenEnvVar)
 		qaseClient := qase.NewClient(qaseToken)
 
 		result := types.DefectActions{}
@@ -100,9 +114,9 @@ var defectsCmd = &cobra.Command{
 			if defectsAutoCreateIssue && !dryRun {
 				title := fmt.Sprintf("[Agentic QA] %s: %s", defect.Classification, defect.TestName)
 				body := buildIssueBody(defect, defectsPRNumber)
-				labels := []string{"agentic-qa", defect.Classification}
+				labels := []string{activePipelineEnv().AgenticQALabel, defect.Classification}
 				if defect.RecommendedSeverity != "" {
-					labels = append(labels, "severity/"+defect.RecommendedSeverity)
+					labels = append(labels, defectSeverityPrefix+defect.RecommendedSeverity)
 				}
 
 				if localTest {
@@ -140,7 +154,7 @@ var defectsCmd = &cobra.Command{
 				// Create Qase defect
 				severity := defect.RecommendedSeverity
 				if severity == "" {
-					severity = "normal"
+					severity = defectNormalSeverity // Qase API default severity
 				}
 
 				if mcpClient.IsConfigured() {
@@ -167,7 +181,7 @@ var defectsCmd = &cobra.Command{
 				if defectsUseCopilot && !localTest {
 					issueNum := extractIssueNumber(issueURL)
 					if issueNum > 0 {
-						if err := gh.AssignCopilot(ctx, owner, repo, issueNum, ghToken); err != nil {
+						if err := gh.AssignCopilot(ctx, owner, repo, issueNum, ghToken, activePipelineEnv().CopilotUsername); err != nil {
 							logrus.Warnf("Failed to assign Copilot to %s: %v", issueURL, err)
 						} else {
 							result.CopilotAssignments = append(result.CopilotAssignments, types.CopilotAssignment{
@@ -178,7 +192,8 @@ var defectsCmd = &cobra.Command{
 					}
 				}
 			} else if dryRun {
-				logrus.Infof("Dry-run: would create issue for %s in %s/%s", defect.TestName, owner, repo)			} else {
+				logrus.Infof("Dry-run: would create issue for %s in %s/%s", defect.TestName, owner, repo)
+			} else {
 				result.Escalated = append(result.Escalated, types.EscalatedDefect{
 					TestName: defect.TestName,
 					Reason:   "auto-create-issues is disabled",

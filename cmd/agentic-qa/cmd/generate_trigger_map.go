@@ -16,6 +16,10 @@ import (
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
+const (
+	genTriggerMapJJBDirFlag = "jjb-dir"
+)
+
 var (
 	genTriggerMapJJBDir     string
 	genTriggerMapOutputFile string
@@ -23,10 +27,10 @@ var (
 
 func init() {
 	f := genTriggerMapCmd.Flags()
-	f.StringVar(&genTriggerMapJJBDir, "jjb-dir", "", "Path to jenkins-job-builder directory (required)")
-	f.StringVar(&genTriggerMapOutputFile, "output-file", "jenkins_trigger_mapping.json", "Output path for jenkins_trigger_mapping.json")
+	f.StringVar(&genTriggerMapJJBDir, genTriggerMapJJBDirFlag, "", "Path to jenkins-job-builder directory (required)")
+	f.StringVar(&genTriggerMapOutputFile, outputFileFlag, "jenkins_trigger_mapping.json", "Output path for jenkins_trigger_mapping.json")
 
-	_ = genTriggerMapCmd.MarkFlagRequired("jjb-dir")
+	_ = genTriggerMapCmd.MarkFlagRequired(genTriggerMapJJBDirFlag)
 	rootCmd.AddCommand(genTriggerMapCmd)
 }
 
@@ -98,8 +102,8 @@ func runGenerateTriggerMap() error {
 	mapping := types.JenkinsTriggerMapping{
 		Metadata: types.MappingMetadata{
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-			GeneratedBy: "agentic-qa generate-trigger-map",
-			Version:     "2.0",
+		GeneratedBy: "agentic-qa " + genTriggerMapCommandName,
+		Version:     mappingFileVersion,
 		},
 		JobMappings:          filteredJobs,
 		TagToJob:             tagToJob,
@@ -339,46 +343,9 @@ func resolveJobDefaults(job *types.JobMapping, allDefaults map[string]*jjbDefaul
 }
 
 // inferTagsFromJobName determines applicable tags from a job's name when the
-// TAGS parameter is empty. Uses naming conventions from the JJB jobs.
+// TAGS parameter is empty, using the active PipelineEnv configuration.
 func inferTagsFromJobName(name string) []string {
-	lower := strings.ToLower(name)
-	var tags []string
-
-	switch {
-	case strings.Contains(lower, "pit-daily") || strings.Contains(lower, "pit.daily"):
-		tags = append(tags, "pit.daily")
-	case strings.Contains(lower, "pit-weekly") || strings.Contains(lower, "pit.weekly"):
-		tags = append(tags, "pit.weekly")
-	case strings.Contains(lower, "pit-harvester") || strings.Contains(lower, "pit.harvester"):
-		tags = append(tags, "pit.harvester.daily")
-	case strings.Contains(lower, "pit-elemental") || strings.Contains(lower, "pit.elemental"):
-		tags = append(tags, "pit.elemental")
-	}
-
-	switch {
-	case strings.Contains(lower, "biweekly"):
-		tags = append(tags, "stress")
-	case strings.Contains(lower, "recurring-weekly") || strings.Contains(lower, "weekly-individual"):
-		tags = append(tags, "extended")
-	case strings.Contains(lower, "recurring-daily") || strings.Contains(lower, "daily-individual"):
-		if !strings.Contains(lower, "pit") {
-			tags = append(tags, "sanity")
-		}
-	case strings.Contains(lower, "sanity"):
-		tags = append(tags, "sanity")
-	}
-
-	if strings.Contains(lower, "freeform") {
-		tags = appendUniqueTrigger(tags, "validation")
-	}
-	if strings.Contains(lower, "airgap") {
-		tags = appendUniqueTrigger(tags, "airgap")
-	}
-	if strings.Contains(lower, "harvester") && !strings.Contains(lower, "pit") {
-		tags = appendUniqueTrigger(tags, "harvester")
-	}
-
-	return tags
+	return activePipelineEnv().InferTagsFromJobName(name)
 }
 
 // filterQAJobs returns only jobs that are relevant to the agentic QA pipeline.
@@ -479,50 +446,16 @@ func buildJenkinsfileMapping(jobs map[string]types.JobMapping) map[string]string
 	return mapping
 }
 
-// inferQaseProject determines the Qase project for a job based on its name and tags.
+// inferQaseProject determines the Qase project for a job based on its tags
+// and name, using the active PipelineEnv configuration.
 func inferQaseProject(jobName string, tags []string) string {
-	// Jobs with pit.* tags → RANCHERINT.
-	for _, tag := range tags {
-		if strings.HasPrefix(tag, "pit.") {
-			return "RANCHERINT"
-		}
-	}
-	// Jobs with sanity/extended/stress/validation/recurring → RANCHERINT (default).
-	for _, tag := range tags {
-		switch tag {
-		case "sanity", "extended", "stress", "validation", "recurring":
-			return "RANCHERINT"
-		}
-	}
-	// Harvester jobs.
-	if strings.Contains(jobName, "harvester") {
-		return "RANCHERINT"
-	}
-	// TFP jobs.
-	if strings.Contains(jobName, "tfp-") {
-		return "RANCHERINT"
-	}
-	// Airgap jobs.
-	if strings.Contains(jobName, "airgap") {
-		return "RANCHERINT"
-	}
-	return "RANCHERINT" // default
+	return activePipelineEnv().InferQaseProject(jobName, tags)
 }
 
-// qaseProjectName returns a human-readable name for a project code.
+// qaseProjectName returns a human-readable name for a project code using the
+// active PipelineEnv configuration.
 func qaseProjectName(code string) string {
-	switch code {
-	case "RANCHERINT":
-		return "Rancher Integration Tests"
-	case "RRT":
-		return "Rancher Regression Tests"
-	case "RM":
-		return "Rancher Manual Tests"
-	case "K3SRKE2":
-		return "K3s/RKE2 Tests"
-	default:
-		return code
-	}
+	return activePipelineEnv().QaseProjectName(code)
 }
 
 // parseTags splits a comma or space-separated tag string into individual tags.

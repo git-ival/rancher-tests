@@ -15,6 +15,12 @@ import (
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
+const (
+	waitTriggeredJobsFlag = "triggered-jobs"
+	waitPollIntervalFlag  = "poll-interval"
+
+)
+
 var (
 	waitTriggeredJobs string
 	waitPollInterval  int
@@ -24,13 +30,13 @@ var (
 
 func init() {
 	f := waitCmd.Flags()
-	f.StringVar(&waitTriggeredJobs, "triggered-jobs", "", "Path to triggered_jobs.json (required)")
-	f.IntVar(&waitPollInterval, "poll-interval", 120, "Poll interval in seconds")
-	f.StringVar(&waitOutputFile, "output-file", "", "Path to write completed_jobs.json (required)")
-	f.StringVar(&waitJenkinsURL, "jenkins-url", "", "Jenkins server URL")
+	f.StringVar(&waitTriggeredJobs, waitTriggeredJobsFlag, "", "Path to triggered_jobs.json (required)")
+	f.IntVar(&waitPollInterval, waitPollIntervalFlag, 120, "Poll interval in seconds")
+	f.StringVar(&waitOutputFile, outputFileFlag, "", "Path to write completed_jobs.json (required)")
+	f.StringVar(&waitJenkinsURL, jenkinsURLFlag, "", "Jenkins server URL")
 
-	_ = waitCmd.MarkFlagRequired("triggered-jobs")
-	_ = waitCmd.MarkFlagRequired("output-file")
+	_ = waitCmd.MarkFlagRequired(waitTriggeredJobsFlag)
+	_ = waitCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(waitCmd)
 }
@@ -40,9 +46,9 @@ func init() {
 func completeQaseRun(ctx context.Context, project string, runID int) {
 	mcpClient := qase.NewMCPClient(mcpURL)
 	if mcpClient.IsConfigured() {
-		if _, err := mcpClient.CallTool(ctx, "qase_complete_run", map[string]any{
-			"code": project,
-			"id":   runID,
+		if _, err := mcpClient.CallTool(ctx, qase.MCPToolCompleteRun, map[string]any{
+			qase.MCPArgCode: project,
+			qase.MCPArgID:   runID,
 		}); err != nil {
 			logrus.Warnf("MCP complete run %d (%s) failed: %v", runID, project, err)
 		} else {
@@ -50,7 +56,7 @@ func completeQaseRun(ctx context.Context, project string, runID int) {
 			return
 		}
 	}
-	qaseToken := os.Getenv("QASE_API_TOKEN")
+	qaseToken := os.Getenv(qaseApiTokenEnvVar)
 	if qaseToken == "" {
 		logrus.Warnf("Cannot complete Qase run %d (%s): no token and MCP not configured", runID, project)
 		return
@@ -77,14 +83,11 @@ var waitCmd = &cobra.Command{
 
 		jenkinsURL := waitJenkinsURL
 		if jenkinsURL == "" {
-			jenkinsURL = os.Getenv("JENKINS_URL")
-		}
-		if jenkinsURL == "" {
-			return fmt.Errorf("Jenkins URL is required (--jenkins-url or JENKINS_URL)")
+		jenkinsURL = os.Getenv(jenkinsURLEnvVar)
 		}
 
-		jenkinsUser := os.Getenv("JENKINS_USER")
-		jenkinsToken := os.Getenv("JENKINS_TOKEN")
+		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 		jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 
 		// Resolve build numbers from queue IDs first
@@ -110,7 +113,7 @@ var waitCmd = &cobra.Command{
 			job := &triggered.Jobs[i]
 			if job.BuildNumber != nil && !isTerminalStatus(job.Status) {
 				pending[i] = job
-			} else if job.Status == "trigger_failed" || job.Status == "dry_run" {
+			} else if job.Status == jobStatusTriggerFailed || job.Status == jobStatusDryRun {
 				completed = append(completed, types.CompletedJob{
 					JobName: job.JobName,
 					Status:  job.Status,
@@ -134,7 +137,7 @@ var waitCmd = &cobra.Command{
 					continue
 				}
 
-				if status.Result != "IN_PROGRESS" {
+				if status.Result != jobStatusInProgress {
 					cj := types.CompletedJob{
 						JobName:         job.JobName,
 						BuildNumber:     job.BuildNumber,
@@ -143,7 +146,7 @@ var waitCmd = &cobra.Command{
 						LogURL:          status.LogURL,
 					}
 
-					if status.Result == "SUCCESS" {
+					if status.Result == jobStatusSuccess {
 						completed = append(completed, cj)
 					} else {
 						failed = append(failed, cj)
@@ -191,7 +194,7 @@ var waitCmd = &cobra.Command{
 
 func isTerminalStatus(s string) bool {
 	switch s {
-	case "SUCCESS", "FAILURE", "UNSTABLE", "ABORTED", "trigger_failed", "dry_run":
+	case jobStatusSuccess, jobStatusFailure, jobStatusUnstable, jobStatusAborted, jobStatusTriggerFailed, jobStatusDryRun:
 		return true
 	}
 	return false

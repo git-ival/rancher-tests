@@ -7,6 +7,8 @@ import (
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
+
+	"github.com/rancher/tests/internal/agenticqa/qase"
 )
 
 func init() {
@@ -21,9 +23,9 @@ var validateCmd = &cobra.Command{
 		var failures int
 
 		// 1. GitHub token
-		ghToken := os.Getenv("GITHUB_TOKEN")
+		ghToken := os.Getenv(githubTokenEnvVar)
 		if ghToken == "" {
-			logrus.Error("GITHUB_TOKEN is not set")
+			logrus.Errorf("%s is not set", githubTokenEnvVar)
 			failures++
 		} else {
 			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, "https://api.github.com/user", nil)
@@ -49,12 +51,12 @@ var validateCmd = &cobra.Command{
 		}
 
 		// 2. Qase token
-		qaseToken := os.Getenv("QASE_API_TOKEN")
+		qaseToken := os.Getenv(qaseApiTokenEnvVar)
 		if qaseToken == "" {
-			logrus.Error("QASE_API_TOKEN is not set")
+			logrus.Errorf("%s is not set", qaseApiTokenEnvVar)
 			failures++
 		} else {
-			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, "https://api.qase.io/v1/project", nil)
+			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, qase.BaseURL+"/project", nil)
 			if err != nil {
 				logrus.Errorf("Qase: failed to create request: %v", err)
 				failures++
@@ -78,10 +80,10 @@ var validateCmd = &cobra.Command{
 
 		// 3. LLM provider
 		switch provider {
-		case "claude-direct":
-			apiKey := os.Getenv("CLAUDE_API_KEY")
+		case llmProviderClaudeDirect:
+			apiKey := os.Getenv(claudeAPIKeyEnvVar)
 			if apiKey == "" {
-				logrus.Error("CLAUDE_API_KEY is not set")
+				logrus.Errorf("%s is not set", claudeAPIKeyEnvVar)
 				failures++
 			} else {
 				req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, "https://api.anthropic.com/v1/models", nil)
@@ -106,10 +108,10 @@ var validateCmd = &cobra.Command{
 					}
 				}
 			}
-		case "vertex-ai":
-			creds := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+		case llmProviderVertexAI:
+			creds := os.Getenv(googleApplicationCredentialsEnvVar)
 			if creds == "" {
-				logrus.Error("GOOGLE_APPLICATION_CREDENTIALS is not set")
+				logrus.Errorf("%s is not set", googleApplicationCredentialsEnvVar)
 				failures++
 			} else if _, err := os.Stat(creds); err != nil {
 				logrus.Errorf("Vertex AI: credentials file not found: %s", creds)

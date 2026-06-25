@@ -12,6 +12,10 @@ import (
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
+const (
+	cfMaxRerunsFlag = "max-reruns"
+)
+
 var (
 	cfTriageResults  string
 	cfPipelineConfig string
@@ -25,17 +29,17 @@ var (
 
 func init() {
 	f := configFailuresCmd.Flags()
-	f.StringVar(&cfTriageResults, "triage-results", "", "Path to triage_results.json (required)")
-	f.StringVar(&cfPipelineConfig, "pipeline-config", "", "Path to pipeline config")
-	f.StringVar(&cfTriggerMapping, "trigger-mapping", "", "Path to jenkins_trigger_mapping.json")
-	f.IntVar(&cfMaxReruns, "max-reruns", 2, "Maximum number of reruns per test")
-	f.StringVar(&cfTestsRepo, "tests-repo", "rancher/tests", "Tests repository (owner/repo)")
-	f.BoolVar(&cfAutoCreatePRs, "auto-create-prs", false, "Automatically create GitHub PRs for guards")
-	f.StringVar(&cfOutputFile, "output-file", "", "Path to write config_actions.json (required)")
-	f.StringVar(&cfJenkinsURL, "jenkins-url", "", "Jenkins server URL")
+	f.StringVar(&cfTriageResults, triageResultsFlag, "", "Path to triage_results.json (required)")
+	f.StringVar(&cfPipelineConfig, pipelineConfigFlag, "", "Path to pipeline config")
+	f.StringVar(&cfTriggerMapping, triggerMappingFlag, "", "Path to jenkins_trigger_mapping.json")
+	f.IntVar(&cfMaxReruns, cfMaxRerunsFlag, 2, "Maximum number of reruns per test")
+	f.StringVar(&cfTestsRepo, testsRepoFlag, defaultTestsRepo, "Tests repository (owner/repo)")
+	f.BoolVar(&cfAutoCreatePRs, autoCreatePRsFlag, false, "Automatically create GitHub PRs for guards")
+	f.StringVar(&cfOutputFile, outputFileFlag, "", "Path to write config_actions.json (required)")
+	f.StringVar(&cfJenkinsURL, jenkinsURLFlag, "", "Jenkins server URL")
 
-	_ = configFailuresCmd.MarkFlagRequired("triage-results")
-	_ = configFailuresCmd.MarkFlagRequired("output-file")
+	_ = configFailuresCmd.MarkFlagRequired(triageResultsFlag)
+	_ = configFailuresCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(configFailuresCmd)
 }
@@ -66,7 +70,7 @@ var configFailuresCmd = &cobra.Command{
 
 		jenkinsURL := cfJenkinsURL
 		if jenkinsURL == "" {
-			jenkinsURL = os.Getenv("JENKINS_URL")
+			jenkinsURL = os.Getenv(jenkinsURLEnvVar)
 		}
 
 		var triggerMapping map[string]any
@@ -116,8 +120,8 @@ Respond with JSON: {"action": "rerun|guard", "reasoning": "string"}`
 					continue
 				}
 
-				jenkinsUser := os.Getenv("JENKINS_USER")
-				jenkinsToken := os.Getenv("JENKINS_TOKEN")
+			jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+			jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 				jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 
 				folder, jobName := splitConfigJobName(issue.TestName, triggerMapping)

@@ -19,9 +19,9 @@ var (
 
 func init() {
 	f := cleanupCmd.Flags()
-	f.StringVar(&cleanupOutputFile, "output-file", "", "Path to write cleanup_result.json (required)")
+	f.StringVar(&cleanupOutputFile, outputFileFlag, "", "Path to write cleanup_result.json (required)")
 
-	_ = cleanupCmd.MarkFlagRequired("output-file")
+	_ = cleanupCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(cleanupCmd)
 }
@@ -43,11 +43,11 @@ var cleanupCmd = &cobra.Command{
 			return fmt.Errorf("loading pipeline state: %w", err)
 		}
 
-		ghToken := os.Getenv("GITHUB_TOKEN")
+		ghToken := os.Getenv(githubTokenEnvVar)
 		gh := ghclient.NewClient(ghToken)
 
 		mcpClient := qase.NewMCPClient(mcpURL)
-		qaseToken := os.Getenv("QASE_API_TOKEN")
+		qaseToken := os.Getenv(qaseApiTokenEnvVar)
 		qaseClient := qase.NewClient(qaseToken)
 
 		result := types.CleanupResult{}

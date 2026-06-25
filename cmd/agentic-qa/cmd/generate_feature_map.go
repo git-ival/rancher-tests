@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -22,6 +23,11 @@ import (
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
+const (
+	genFeatureMapValidationDirFlag = "validation-dir"
+	genFeatureMapActionsDirFlag    = "actions-dir"
+)
+
 var (
 	genFeatureMapValidationDir string
 	genFeatureMapOutputFile    string
@@ -31,11 +37,11 @@ var (
 
 func init() {
 	f := genFeatureMapCmd.Flags()
-	f.StringVar(&genFeatureMapValidationDir, "validation-dir", "validation", "Path to rancher-tests validation/ directory")
-	f.StringVar(&genFeatureMapOutputFile, "output-file", "./agentic-qa/feature_test_mapping.json", "Output path for feature_test_mapping.json")
-	f.StringVar(&genFeatureMapActionsDir, "actions-dir", "actions", "Path to rancher-tests actions/ directory")
-	f.StringSliceVar(&genFeatureMapQaseProjects, "qase-projects", []string{"RANCHERINT", "RRT", "RM", "K3SRKE2"},
-		"Qase project codes to scan for title-based fallback matching (comma-separated)")
+	f.StringVar(&genFeatureMapValidationDir, genFeatureMapValidationDirFlag, "validation", "Path to rancher-tests validation/ directory")
+	f.StringVar(&genFeatureMapOutputFile, outputFileFlag, "./agentic-qa/feature_test_mapping.json", "Output path for feature_test_mapping.json")
+	f.StringVar(&genFeatureMapActionsDir, genFeatureMapActionsDirFlag, "actions", "Path to rancher-tests actions/ directory")
+	f.StringSliceVar(&genFeatureMapQaseProjects, qaseProjectsFlag, nil,
+		"Qase project codes to scan for title-based fallback matching (comma-separated); defaults to qase_projects from --pipeline-env")
 
 	rootCmd.AddCommand(genFeatureMapCmd)
 }
@@ -55,9 +61,18 @@ title, id, and automation_test_name.`,
 }
 
 func runGenerateFeatureMap(ctx context.Context) error {
-	qaseToken := os.Getenv("QASE_API_TOKEN")
+	qaseToken := os.Getenv(qaseApiTokenEnvVar)
 	if qaseToken == "" {
-		return fmt.Errorf("QASE_API_TOKEN environment variable is required")
+		return fmt.Errorf("%s environment variable is required", qaseApiTokenEnvVar)
+	}
+
+	env := activePipelineEnv()
+
+	// Resolve the Qase project list: prefer explicit --qase-projects flag,
+	// then pipeline_env.json, then the generated defaults.
+	fallbackProjects := genFeatureMapQaseProjects
+	if len(fallbackProjects) == 0 {
+		fallbackProjects = env.QaseProjects
 	}
 
 	logrus.Info("Discovering test files...")
@@ -68,7 +83,8 @@ func runGenerateFeatureMap(ctx context.Context) error {
 	logrus.Infof("Found %d test files", len(testFiles))
 
 	logrus.Info("Loading schema files...")
-	schemaCases, err := schema.LoadDir(genFeatureMapValidationDir)
+	atnFieldKey := fmt.Sprintf("%d", env.QaseATNFieldID)
+	schemaCases, err := schema.LoadDir(genFeatureMapValidationDir, atnFieldKey)
 	if err != nil {
 		return fmt.Errorf("loading schema files: %w", err)
 	}
@@ -84,7 +100,7 @@ func runGenerateFeatureMap(ctx context.Context) error {
 
 	// Fetch automation name → case ID maps from Qase API, then stamp CaseID onto
 	// every CaseMeta entry before associating them with test files.
-	qaseClient := qase.NewClient(qaseToken)
+	qaseClient := qase.NewClientWithATNFieldID(qaseToken, env.QaseATNFieldID)
 	projectMaps := map[string]map[string]int{}
 	for project := range projectSet {
 		logrus.Infof("Fetching Qase cases for project %s...", project)
@@ -123,20 +139,20 @@ func runGenerateFeatureMap(ctx context.Context) error {
 	// Fallback: for test files that still have no QaseCases, try to match their
 	// test function names against Qase case titles in all configured projects.
 	if totalUnresolved > 0 {
-		fallbackResolved := resolveByTitleFallback(ctx, qaseClient, testFiles, genFeatureMapQaseProjects)
+		fallbackResolved := resolveByTitleFallback(ctx, qaseClient, testFiles, fallbackProjects)
 		logrus.Infof("Title fallback resolved %d additional cases across unmapped test files", fallbackResolved)
 		totalResolved += fallbackResolved
 	}
 
 	// Group test files into feature areas.
-	featureAreas := groupFeatureAreas(testFiles, genFeatureMapValidationDir, genFeatureMapActionsDir)
+	featureAreas := groupFeatureAreas(testFiles, genFeatureMapValidationDir, genFeatureMapActionsDir, env.TagToJob)
 
 	// Build output.
 	mapping := types.FeatureTestMapping{
 		Metadata: types.MappingMetadata{
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-			GeneratedBy: "agentic-qa generate-feature-map",
-			Version:     "2.0",
+			GeneratedBy: "agentic-qa " + genFeatureMapCommandName,
+			Version:     mappingFileVersion,
 		},
 		FeatureAreas: featureAreas,
 	}
@@ -479,7 +495,8 @@ func resolveByTitleFallback(ctx context.Context, qaseClient *qase.Client, files 
 
 // groupFeatureAreas organizes discovered test files into feature areas keyed
 // by a normalized directory-based name (e.g. "nodescaling_rke2").
-func groupFeatureAreas(files []*discoveredTestFile, validationDir, actionsDir string) map[string]types.FeatureArea {
+// tagToJob is the tag→Jenkins-job mapping from the active PipelineEnv.
+func groupFeatureAreas(files []*discoveredTestFile, validationDir, actionsDir string, tagToJob map[string]string) map[string]types.FeatureArea {
 	areas := map[string]*types.FeatureArea{}
 
 	for _, tf := range files {
@@ -513,7 +530,7 @@ func groupFeatureAreas(files []*discoveredTestFile, validationDir, actionsDir st
 	// Resolve actions packages and Jenkins jobs for each area.
 	for key, area := range areas {
 		area.ActionsPackages = findActionsPackages(key, actionsDir)
-		area.JenkinsJobs = inferJenkinsJobs(area.PITTags)
+		area.JenkinsJobs = inferJenkinsJobs(area.PITTags, tagToJob)
 		sort.Strings(area.PITTags)
 	}
 
@@ -571,24 +588,12 @@ func findActionsPackages(areaKey, actionsDir string) []string {
 	return packages
 }
 
-// inferJenkinsJobs determines which Jenkins jobs match based on build tags.
-var tagToJobMap = map[string]string{
-	"pit.daily":           "go-pit-daily-individual-job-updated",
-	"pit.weekly":          "go-pit-weekly-multibranch-job",
-	"pit.harvester.daily": "harvester-e2e-recurring-job",
-	"pit.elemental":       "go-pit-daily-individual-job-updated",
-	"pit.event":           "go-pit-daily-individual-job-updated",
-	"sanity":              "go-recurring-daily-individual-job",
-	"extended":            "go-recurring-weekly-individual-job",
-	"stress":              "go-recurring-biweekly-individual-job",
-	"validation":          "go-automation-freeform-job",
-	"recurring":           "go-recurring-daily-individual-job",
-}
-
-func inferJenkinsJobs(tags []string) []string {
+// inferJenkinsJobs returns the Jenkins job names that match the given build
+// tags, using the tag→job mapping from the active PipelineEnv.
+func inferJenkinsJobs(tags []string, tagToJob map[string]string) []string {
 	jobSet := map[string]struct{}{}
 	for _, tag := range tags {
-		if job, ok := tagToJobMap[tag]; ok {
+		if job, ok := tagToJob[tag]; ok {
 			jobSet[job] = struct{}{}
 		}
 	}
@@ -602,10 +607,8 @@ func inferJenkinsJobs(tags []string) []string {
 
 // appendUnique appends s to slice only if not already present.
 func appendUnique(slice []string, s string) []string {
-	for _, v := range slice {
-		if v == s {
-			return slice
-		}
+	if slices.Contains(slice, s) {
+		return slice
 	}
 	return append(slice, s)
 }

@@ -12,7 +12,7 @@ func newLLMClient(ctx context.Context, model string) (*llm.Client, error) {
 	return llm.NewClient(ctx, llm.Config{
 		Provider:       provider,
 		Model:          model,
-		APIKey:         os.Getenv("CLAUDE_API_KEY"),
+		APIKey:         os.Getenv(claudeAPIKeyEnvVar),
 		VertexProject:  vertexProject,
 		VertexLocation: vertexLocation,
 	})

@@ -11,24 +11,30 @@ import (
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
+const (
+	analyzeCompletedJobsFlag   = "completed-jobs"
+	analyzeTriageFrameworkFlag = "triage-framework"
+	analyzeFeatureMappingFlag  = "feature-mapping"
+)
+
 var (
-	analyzeCompletedJobs      string
-	analyzeTriageFramework    string
-	analyzeFeatureMapping     string
-	analyzeOutputFile         string
-	analyzeAdditionalContext  string
+	analyzeCompletedJobs     string
+	analyzeTriageFramework   string
+	analyzeFeatureMapping    string
+	analyzeOutputFile        string
+	analyzeAdditionalContext string
 )
 
 func init() {
 	f := analyzeCmd.Flags()
-	f.StringVar(&analyzeCompletedJobs, "completed-jobs", "", "Path to completed_jobs.json (required)")
-	f.StringVar(&analyzeTriageFramework, "triage-framework", "", "Path to triage_framework.json")
-	f.StringVar(&analyzeFeatureMapping, "feature-mapping", "", "Path to feature_test_mapping.json")
-	f.StringVar(&analyzeOutputFile, "output-file", "", "Path to write triage_results.json (required)")
-	f.StringVar(&analyzeAdditionalContext, "additional-context-file", "", "Path to additional context file")
+	f.StringVar(&analyzeCompletedJobs, analyzeCompletedJobsFlag, "", "Path to completed_jobs.json (required)")
+	f.StringVar(&analyzeTriageFramework, analyzeTriageFrameworkFlag, "", "Path to triage_framework.json")
+	f.StringVar(&analyzeFeatureMapping, analyzeFeatureMappingFlag, "", "Path to feature_test_mapping.json")
+	f.StringVar(&analyzeOutputFile, outputFileFlag, "", "Path to write triage_results.json (required)")
+	f.StringVar(&analyzeAdditionalContext, additionalContextFlag, "", "Path to additional context file")
 
-	_ = analyzeCmd.MarkFlagRequired("completed-jobs")
-	_ = analyzeCmd.MarkFlagRequired("output-file")
+	_ = analyzeCmd.MarkFlagRequired(analyzeCompletedJobsFlag)
+	_ = analyzeCmd.MarkFlagRequired(outputFileFlag)
 
 	rootCmd.AddCommand(analyzeCmd)
 }
@@ -80,10 +86,10 @@ var analyzeCmd = &cobra.Command{
 
 		// Process passed tests
 		for _, job := range completedJobs.Completed {
-			result.Passed = append(result.Passed, types.TriageEntry{
-				TestName:       job.JobName,
-				Classification: "passed",
-			})
+		result.Passed = append(result.Passed, types.TriageEntry{
+			TestName:       job.JobName,
+			Classification: triage.ClassPassed,
+		})
 		}
 
 		// Process failed tests
@@ -111,12 +117,12 @@ var analyzeCmd = &cobra.Command{
 				logrus.Errorf("Failed to create LLM client for triage: %v", err)
 				// Add as unclassified
 				for _, job := range llmNeeded {
-					result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
-						TestName:       job.JobName,
-						Classification: "unknown",
-						Confidence:     "low",
-						Evidence:       "LLM client creation failed",
-					})
+			result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
+					TestName:       job.JobName,
+					Classification: triage.ClassUnknown,
+					Confidence:     "low",
+					Evidence:       "LLM client creation failed",
+				})
 				}
 			} else {
 				systemPrompt := buildTriageSystemPrompt(frameworkData, additionalContext)
@@ -130,12 +136,12 @@ var analyzeCmd = &cobra.Command{
 					var triageEntry types.TriageEntry
 					if err := llmClient.CompleteJSON(ctx, systemPrompt, userMsg, 2048, &triageEntry); err != nil {
 						logrus.Warnf("LLM triage failed for %s: %v", job.JobName, err)
-						triageEntry = types.TriageEntry{
-							TestName:       job.JobName,
-							Classification: "unknown",
-							Confidence:     "low",
-							Evidence:       fmt.Sprintf("LLM triage failed: %v", err),
-						}
+					triageEntry = types.TriageEntry{
+						TestName:       job.JobName,
+						Classification: triage.ClassUnknown,
+						Confidence:     "low",
+						Evidence:       fmt.Sprintf("LLM triage failed: %v", err),
+					}
 					}
 					triageEntry.TestName = job.JobName
 
@@ -183,9 +189,10 @@ func classifyByPattern(job types.CompletedJob, patterns []triage.PatternRule) *t
 }
 
 func buildTriageSystemPrompt(framework, additionalContext string) string {
-	prompt := `You are a test failure triage expert for the Rancher project.
+	env := activePipelineEnv()
+	prompt := fmt.Sprintf(`You are a test failure triage expert for the %s project.
 Classify the test failure into one of these categories:
-- "product_defect": a bug in the Rancher product
+- "product_defect": a bug in the product
 - "test_defect": a bug in the test code itself
 - "config_environment": an infrastructure or configuration issue
 
@@ -197,7 +204,7 @@ Respond with a JSON object:
   "evidence": "string explaining the classification",
   "recommended_severity": "blocker|critical|major|normal|minor|trivial",
   "recommended_action": "string"
-}`
+}`, env.ProjectDisplayName)
 
 	if framework != "" {
 		prompt += fmt.Sprintf("\n\nTriage framework:\n%s", framework)
