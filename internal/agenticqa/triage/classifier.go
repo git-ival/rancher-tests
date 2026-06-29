@@ -9,6 +9,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	// triageLLMMaxTokens is the max-token budget for LLM triage classification
+	// responses. These are structured JSON objects and are always compact.
+	triageLLMMaxTokens = 1024
+)
+
 // Classification is the result of classifying a single test failure.
 type Classification struct {
 	TestName            string `json:"test_name"`
@@ -146,7 +152,7 @@ func (c *Classifier) ClassifyWithLLM(ctx context.Context, testName, pkg, errorTe
 	}
 
 	var result llmClassification
-	if err := c.llmClient.CompleteJSON(ctx, c.buildLLMSystemPrompt(), userMessage, 1024, &result); err != nil {
+	if err := c.llmClient.CompleteJSON(ctx, c.buildLLMSystemPrompt(), userMessage, triageLLMMaxTokens, &result); err != nil {
 		return nil, fmt.Errorf("triage: LLM classification failed: %w", err)
 	}
 
@@ -170,5 +176,3 @@ func (c *Classifier) ClassifyWithLLM(ctx context.Context, testName, pkg, errorTe
 		RecommendedAction:   result.Action,
 	}, nil
 }
-
-

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,10 @@ const (
 	defaultRetryAttempts = 5
 	minRetryDelay        = 2 * time.Second
 	maxRetryDelay        = 60 * time.Second
+
+	// defaultTemperature is the LLM sampling temperature used for all
+	// completions. Lower values make output more deterministic.
+	defaultTemperature = 0.3
 )
 
 // Client wraps the Anthropic Messages API for both Direct and Vertex AI providers.
@@ -101,7 +106,7 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userMessage string,
 				Messages: []anthropic.MessageParam{
 					anthropic.NewUserMessage(anthropic.NewTextBlock(userMessage)),
 				},
-				Temperature: anthropic.Float(0.3),
+				Temperature: anthropic.Float(defaultTemperature),
 			})
 			return reqErr
 		},
@@ -173,7 +178,7 @@ func isRetryableError(err error) bool {
 	var apiErr *anthropic.Error
 	if errors.As(err, &apiErr) {
 		// Retry on 429 (rate limit) and 5xx (server errors).
-		if apiErr.StatusCode == 429 || apiErr.StatusCode >= 500 {
+		if apiErr.StatusCode == http.StatusTooManyRequests || apiErr.StatusCode >= http.StatusInternalServerError {
 			return true
 		}
 	}

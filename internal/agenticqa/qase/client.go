@@ -16,7 +16,28 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-const BaseURL = "https://api.qase.io/v1"
+const (
+	BaseURL = "https://api.qase.io/v1"
+
+	// defaultHTTPTimeout is the timeout for individual Qase API HTTP requests.
+	defaultHTTPTimeout = 30 * time.Second
+	// defaultRateLimitWait is the wait duration when the Retry-After header is
+	// missing from a 429 response.
+	defaultRateLimitWait = 5 * time.Second
+	// maxErrBodyLen is the maximum number of bytes of an API error body to
+	// include in error messages.
+	maxErrBodyLen = 500
+	// qaseRetryAttempts is the number of attempts before giving up on a Qase
+	// API call.
+	qaseRetryAttempts = 5
+	// qaseRetryInitialDelay is the initial delay between retry attempts.
+	qaseRetryInitialDelay = 1 * time.Second
+	// qaseRetryMaxDelay is the maximum delay between retry attempts.
+	qaseRetryMaxDelay = 30 * time.Second
+	// qasePaginationLimit is the maximum number of items per page when
+	// listing Qase resources.
+	qasePaginationLimit = 100
+)
 
 // TestResult represents a single test result from Qase.
 type TestResult struct {
@@ -80,7 +101,7 @@ func NewClientWithATNFieldID(token string, atnFieldID int) *Client {
 		baseURL: BaseURL,
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: defaultHTTPTimeout,
 		},
 		atnFieldID: atnFieldID,
 	}
@@ -142,7 +163,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 			}
 
 			if resp.StatusCode == http.StatusTooManyRequests {
-				wait := 5 * time.Second
+				wait := defaultRateLimitWait
 				if ra := resp.Header.Get("Retry-After"); ra != "" {
 					if secs, parseErr := strconv.Atoi(ra); parseErr == nil {
 						wait = time.Duration(secs) * time.Second
@@ -156,8 +177,8 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 				// Include truncated response body for diagnostics on client errors.
 				errBody := string(respData)
-				if len(errBody) > 500 {
-					errBody = errBody[:500] + "..."
+				if len(errBody) > maxErrBodyLen {
+					errBody = errBody[:maxErrBodyLen] + "..."
 				}
 				logrus.WithFields(logrus.Fields{
 					"status": resp.StatusCode,
@@ -184,10 +205,10 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 			return nil
 		},
 		retry.Context(ctx),
-		retry.Attempts(5),
+		retry.Attempts(qaseRetryAttempts),
 		retry.DelayType(retry.BackOffDelay),
-		retry.Delay(1*time.Second),
-		retry.MaxDelay(30*time.Second),
+		retry.Delay(qaseRetryInitialDelay),
+		retry.MaxDelay(qaseRetryMaxDelay),
 		retry.LastErrorOnly(true),
 	)
 
@@ -269,11 +290,10 @@ func (c *Client) CompleteTestRun(ctx context.Context, project string, runID int)
 func (c *Client) GetTestRunResults(ctx context.Context, project string, runID int) ([]TestResult, error) {
 	var allResults []TestResult
 	offset := 0
-	limit := 100
 
 	for {
 		path := fmt.Sprintf("/result/%s?run=%d&limit=%d&offset=%d",
-			url.PathEscape(project), runID, limit, offset)
+			url.PathEscape(project), runID, qasePaginationLimit, offset)
 		result, err := c.doRequest(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, fmt.Errorf("fetching test run results: %w", err)
@@ -293,7 +313,7 @@ func (c *Client) GetTestRunResults(ctx context.Context, project string, runID in
 		if len(allResults) >= page.Total {
 			break
 		}
-		offset += limit
+		offset += qasePaginationLimit
 	}
 
 	return allResults, nil
@@ -329,8 +349,8 @@ func (c *Client) DeleteDefect(ctx context.Context, project string, defectID int)
 
 // SearchCases searches test cases by title.
 func (c *Client) SearchCases(ctx context.Context, project, query string) ([]TestCase, error) {
-	path := fmt.Sprintf("/case/%s?search=%s&limit=100",
-		url.PathEscape(project), url.QueryEscape(query))
+	path := fmt.Sprintf("/case/%s?search=%s&limit=%d",
+		url.PathEscape(project), url.QueryEscape(query), qasePaginationLimit)
 	result, err := c.doRequest(ctx, http.MethodGet, path, nil)
 	if err != nil {
 		return nil, fmt.Errorf("searching cases: %w", err)
@@ -379,11 +399,10 @@ func (c *Client) GetTestHistory(ctx context.Context, project string, caseID, lim
 func (c *Client) GetAutomationNameMap(ctx context.Context, project string) (map[string]int, error) {
 	nameToID := map[string]int{}
 	offset := 0
-	const limit = 100
 
 	for {
 		path := fmt.Sprintf("/case/%s?limit=%d&offset=%d",
-			url.PathEscape(project), limit, offset)
+			url.PathEscape(project), qasePaginationLimit, offset)
 		result, err := c.doRequest(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, fmt.Errorf("fetching cases for project %s: %w", project, err)
@@ -424,11 +443,10 @@ func (c *Client) GetAutomationNameMap(ctx context.Context, project string) (map[
 func (c *Client) GetTitleMap(ctx context.Context, project string) (map[string]int, error) {
 	titleToID := map[string]int{}
 	offset := 0
-	const limit = 100
 
 	for {
 		path := fmt.Sprintf("/case/%s?limit=%d&offset=%d",
-			url.PathEscape(project), limit, offset)
+			url.PathEscape(project), qasePaginationLimit, offset)
 		result, err := c.doRequest(ctx, http.MethodGet, path, nil)
 		if err != nil {
 			return nil, fmt.Errorf("fetching cases for project %s: %w", project, err)

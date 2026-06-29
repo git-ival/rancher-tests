@@ -18,7 +18,6 @@ import (
 const (
 	waitTriggeredJobsFlag = "triggered-jobs"
 	waitPollIntervalFlag  = "poll-interval"
-
 )
 
 var (
@@ -31,7 +30,7 @@ var (
 func init() {
 	f := waitCmd.Flags()
 	f.StringVar(&waitTriggeredJobs, waitTriggeredJobsFlag, "", "Path to triggered_jobs.json (required)")
-	f.IntVar(&waitPollInterval, waitPollIntervalFlag, 120, "Poll interval in seconds")
+	f.IntVar(&waitPollInterval, waitPollIntervalFlag, defaultPollIntervalSeconds, "Poll interval in seconds")
 	f.StringVar(&waitOutputFile, outputFileFlag, "", "Path to write completed_jobs.json (required)")
 	f.StringVar(&waitJenkinsURL, jenkinsURLFlag, "", "Jenkins server URL")
 
@@ -83,7 +82,7 @@ var waitCmd = &cobra.Command{
 
 		jenkinsURL := waitJenkinsURL
 		if jenkinsURL == "" {
-		jenkinsURL = os.Getenv(jenkinsURLEnvVar)
+			jenkinsURL = os.Getenv(jenkinsURLEnvVar)
 		}
 
 		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
@@ -142,7 +141,7 @@ var waitCmd = &cobra.Command{
 						JobName:         job.JobName,
 						BuildNumber:     job.BuildNumber,
 						Status:          status.Result,
-						DurationMinutes: float64(status.DurationMS) / 60000.0,
+						DurationMinutes: float64(status.DurationMS) / millisecondsPerMinute,
 						LogURL:          status.LogURL,
 					}
 
@@ -174,7 +173,7 @@ var waitCmd = &cobra.Command{
 		}
 
 		result := types.CompletedJobs{
-			QaseRuns:             triggered.QaseRuns, // propagate for downstream consumers
+			QaseRuns:             triggered.QaseRuns,  // propagate for downstream consumers
 			QaseRunID:            triggered.QaseRunID, // backward compat
 			Completed:            completed,
 			Failed:               failed,

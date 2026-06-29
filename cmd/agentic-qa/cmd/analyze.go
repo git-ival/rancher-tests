@@ -134,7 +134,7 @@ var analyzeCmd = &cobra.Command{
 						job.JobName, job.Status, job.LogURL, job.DurationMinutes)
 
 					var triageEntry types.TriageEntry
-					if err := llmClient.CompleteJSON(ctx, systemPrompt, userMsg, 2048, &triageEntry); err != nil {
+					if err := llmClient.CompleteJSON(ctx, systemPrompt, userMsg, llmMaxTokensTriage, &triageEntry); err != nil {
 						logrus.Warnf("LLM triage failed for %s: %v", job.JobName, err)
 						triageEntry = types.TriageEntry{
 							TestName:       job.JobName,

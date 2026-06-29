@@ -11,6 +11,12 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	// githubPageSize is the maximum number of items per page when listing
+	// GitHub resources.
+	githubPageSize = 100
+)
+
 // PRInfo holds pull request metadata.
 type PRInfo struct {
 	Title  string
@@ -80,7 +86,7 @@ func (c *Client) GetPRDiff(ctx context.Context, owner, repo string, prNumber int
 // GetPRFiles returns the list of file paths changed in a PR.
 func (c *Client) GetPRFiles(ctx context.Context, owner, repo string, prNumber int) ([]string, error) {
 	var allFiles []string
-	opts := &gh.ListOptions{PerPage: 100}
+	opts := &gh.ListOptions{PerPage: githubPageSize}
 
 	for {
 		files, resp, err := c.client.PullRequests.ListFiles(ctx, owner, repo, prNumber, opts)

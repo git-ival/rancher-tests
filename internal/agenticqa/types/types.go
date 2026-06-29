@@ -84,6 +84,122 @@ type CompletedJob struct {
 	LogURL          string  `json:"log_url,omitempty"`
 }
 
+// ---------------------------------------------------------------------------
+// Domain constants shared across packages
+// ---------------------------------------------------------------------------
+
+// Node role names used in machine-pool configuration and role-signature logic.
+const (
+	RoleEtcd         = "etcd"
+	RoleControlPlane = "controlplane"
+	RoleWorker       = "worker"
+	RoleWindows      = "windows"
+)
+
+// Kubernetes distro identifiers.
+const (
+	DistroRKE2 = "rke2"
+	DistroK3S  = "k3s"
+	DistroRKE1 = "rke1"
+)
+
+// Cloud / node provider identifiers.
+const (
+	ProviderAWS          = "aws"
+	ProviderAzure        = "azure"
+	ProviderDO           = "do"
+	ProviderDigitalOcean = "digitalocean"
+	ProviderHarvester    = "harvester"
+	ProviderLinode       = "linode"
+	ProviderGoogle       = "google"
+	ProviderVsphere      = "vsphere"
+	ProviderVsphereCloud = "rancher-vsphere"
+	ProviderExternal     = "external"
+)
+
+// CNI plugin identifiers.
+const (
+	CNICalico  = "calico"
+	CNICilium  = "cilium"
+	CNICanal   = "canal"
+	CNIFlannel = "flannel"
+	CNIMultus  = "multus"
+	CNIWeave   = "weave"
+)
+
+// PSACT profile identifiers.
+const (
+	PSACTPrivileged = "rancher-privileged"
+	PSACTRestricted = "rancher-restricted"
+	PSACTBaseline   = "rancher-baseline"
+)
+
+// Network stack preference values.
+const (
+	StackPreferenceDual = "dual"
+)
+
+// Workload kind strings used as WorkloadRequirement.Kind values and in
+// workload weight tables.
+const (
+	WorkloadDeployment  = "deployment"
+	WorkloadPod         = "pod"
+	WorkloadDaemonSet   = "daemonset"
+	WorkloadStatefulSet = "statefulset"
+	WorkloadCronJob     = "cronjob"
+	WorkloadJob         = "job"
+	WorkloadIngress     = "ingress"
+	WorkloadHPA         = "horizontalpodautoscaler"
+)
+
+// Spec source labels recorded in MachineSpec.Source.
+const (
+	SpecSourceHeuristic = "heuristic"
+	SpecSourceLLM       = "llm"
+)
+
+// Environment-plan strategy values.
+const (
+	PlanStrategySingle   = "single"
+	PlanStrategyPerGroup = "per_group"
+	PlanGroupNameAll     = "all"
+)
+
+// Plan derivation method labels recorded in EnvironmentGroup.DerivedBy.
+const (
+	DerivedByStatic  = "static"
+	DerivedByLLM     = "llm"
+	DerivedByDefault = "default"
+)
+
+// Config-failure action values used by the config-failures command.
+const (
+	CFActionRerun = "rerun"
+	CFActionGuard = "guard"
+)
+
+// Sizing profile names used by plan-environment --sizing-profile.
+const (
+	SizingProfileMinimal  = "minimal"
+	SizingProfileBalanced = "balanced"
+	SizingProfileHA       = "ha"
+)
+
+// Sizing policy targets: which cluster a profile sub-spec applies to.
+const (
+	SizingTargetUpstream   = "upstream"
+	SizingTargetDownstream = "downstream"
+)
+
+// Infrastructure (qa-infra-automation) node role names. These differ from the
+// rancher-tests role names (in particular controlplane -> cp) and are used when
+// emitting the upstream terraform.tfvars node topology.
+const (
+	InfraRoleEtcd   = "etcd"
+	InfraRoleCP     = "cp"
+	InfraRoleWorker = "worker"
+)
+
 // TriageResults is the output of the "analyze" step.
 type TriageResults struct {
 	QaseRunID      *int          `json:"qase_run_id,omitempty"`
@@ -293,4 +409,169 @@ type JobParameter struct {
 type QaseProjectInfo struct {
 	Name           string   `json:"name"`
 	AutomationTags []string `json:"automation_tags"`
+}
+
+// ---------------------------------------------------------------------------
+// Environment Plan types (output of plan-environment)
+// ---------------------------------------------------------------------------
+
+// EnvironmentPlan is the top-level output of the "plan-environment" step. It
+// describes the minimum viable test environment(s) required to run the
+// identified tests, derived from static analysis of the test sources with an
+// LLM fallback for inconclusive cases.
+type EnvironmentPlan struct {
+	Metadata MappingMetadata `json:"_metadata"`
+	PRNumber int             `json:"pr_number"`
+	// Strategy is either "single" (one environment satisfies all tests) or
+	// "per_group" (each Jenkins-job/build-tag group gets its own environment
+	// because a single merged environment was determined to be unsafe).
+	Strategy string `json:"strategy"`
+	// Groups holds one environment per group. When Strategy == "single" there
+	// is exactly one group named "all".
+	Groups []EnvironmentGroup `json:"groups"`
+	// Upstream is the recommended upstream (Rancher management) cluster
+	// topology. It is singular for the whole plan and is populated unless
+	// upstream recommendation is disabled (--no-upstream).
+	Upstream *UpstreamCluster `json:"upstream,omitempty"`
+}
+
+// UpstreamCluster describes the recommended topology and settings for the
+// upstream Rancher management cluster. Unlike downstream clusters, it is not
+// derived from the tests; it starts from a fixed baseline and is then shaped by
+// the sizing policy. It is rendered into qa-infra-automation input files
+// (terraform.tfvars + ansible vars.yaml).
+type UpstreamCluster struct {
+	// NodePools is the management-cluster machine pools (roles + quantities).
+	NodePools []NodeRequirement `json:"node_pools"`
+	// KubernetesDistro is the management-cluster distro ("rke2" or "k3s").
+	KubernetesDistro string `json:"kubernetes_distro,omitempty"`
+	// KubernetesVersion is the management-cluster k8s version (may be a ${VAR}).
+	KubernetesVersion string `json:"kubernetes_version,omitempty"`
+	// CNI is the management-cluster CNI plugin.
+	CNI string `json:"cni,omitempty"`
+	// Provider is the cloud/node provider for the management cluster.
+	Provider string `json:"provider,omitempty"`
+	// Env is the qa-infra deployment environment (e.g. "default", "airgap").
+	Env string `json:"env,omitempty"`
+	// TotalNodes is the sum of all node-pool quantities.
+	TotalNodes int `json:"total_nodes"`
+	// AppliedProfile records the sizing profile applied to this cluster.
+	AppliedProfile string `json:"applied_profile,omitempty"`
+	// ArtifactPaths lists the generated qa-infra files (relative to the upstream
+	// output subdirectory). Empty when upstream emission was disabled.
+	ArtifactPaths []string `json:"artifact_paths,omitempty"`
+	// Warnings captures non-fatal issues from policy application.
+	Warnings []string `json:"warnings,omitempty"`
+}
+
+// EnvironmentGroup describes the minimum viable environment for one group of
+// tests that share a Jenkins job / build-tag set.
+type EnvironmentGroup struct {
+	// Name identifies the group: "all" for the single strategy, otherwise the
+	// Jenkins job name (or build tag) the group is keyed on.
+	Name string `json:"name"`
+	// JenkinsJobs are the Jenkins jobs this environment serves.
+	JenkinsJobs []string `json:"jenkins_jobs,omitempty"`
+	// BuildTags are the build tags covered by this environment.
+	BuildTags []string `json:"build_tags,omitempty"`
+	// TestFiles are the identified test file paths covered by this environment.
+	TestFiles []string `json:"test_files,omitempty"`
+	// Cluster is the computed minimum viable cluster requirement.
+	Cluster ClusterRequirement `json:"cluster"`
+	// Workloads are deployments/resources that must be present for the tests.
+	Workloads []WorkloadRequirement `json:"workloads,omitempty"`
+	// CattleConfigPath is the path to the generated cattle-config.yaml for this
+	// group, relative to the plan output directory. Empty if generation was
+	// disabled.
+	CattleConfigPath string `json:"cattle_config_path,omitempty"`
+	// DerivedBy records, per test file, how requirements were derived:
+	// "static" or "llm". Useful for auditing confidence.
+	DerivedBy map[string]string `json:"derived_by,omitempty"`
+	// Warnings captures non-fatal issues (e.g. conflicting requirements that
+	// were resolved by taking the maximum/superset).
+	Warnings []string `json:"warnings,omitempty"`
+	// AppliedProfile records the sizing profile applied to this group's
+	// downstream cluster (e.g. "minimal", "ha").
+	AppliedProfile string `json:"applied_profile,omitempty"`
+}
+
+// ClusterRequirement describes the downstream cluster topology and config that
+// the tests in a group require. Mirrors the rancher-tests provisioningInput /
+// clusterConfig schema closely enough to render a cattle-config.yaml.
+type ClusterRequirement struct {
+	// NodePools is the minimum set of machine pools (roles + quantities).
+	NodePools []NodeRequirement `json:"node_pools"`
+	// KubernetesDistro is "rke2", "k3s", or "rke1" (the downstream distro).
+	KubernetesDistro string `json:"kubernetes_distro,omitempty"`
+	// KubernetesVersion is the required k8s version, empty means "use default".
+	KubernetesVersion string `json:"kubernetes_version,omitempty"`
+	// CNI is the required CNI plugin (e.g. "calico", "cilium"), empty = default.
+	CNI string `json:"cni,omitempty"`
+	// Provider is the node/cloud provider (e.g. "aws", "azure", "harvester").
+	Provider string `json:"provider,omitempty"`
+	// NodeProvider is the lower-level node provider (e.g. "ec2").
+	NodeProvider string `json:"node_provider,omitempty"`
+	// PSACT is the Pod Security Admission Configuration Template requirement.
+	PSACT string `json:"psact,omitempty"`
+	// Hardened indicates a CIS-hardened cluster is required.
+	Hardened bool `json:"hardened,omitempty"`
+	// Networking captures special networking requirements.
+	Networking *NetworkingRequirement `json:"networking,omitempty"`
+	// Downstream indicates whether a downstream cluster is required at all
+	// (some tests only need the local/management cluster).
+	Downstream bool `json:"downstream"`
+	// TotalNodes is the sum of all node-pool quantities, for quick reference.
+	TotalNodes int `json:"total_nodes"`
+}
+
+// NodeRequirement is one machine pool: a role set and a node count.
+type NodeRequirement struct {
+	Etcd         bool   `json:"etcd"`
+	ControlPlane bool   `json:"controlplane"`
+	Worker       bool   `json:"worker"`
+	Windows      bool   `json:"windows,omitempty"`
+	Quantity     int    `json:"quantity"`
+	Description  string `json:"description,omitempty"`
+	// Spec holds the recommended machine size for this pool. It is only
+	// populated when plan-environment is run with --recommend-specs; otherwise
+	// nil and the cattle-config falls back to the template's machine fields
+	// (e.g. ${AWS_INSTANCE_TYPE}).
+	Spec *MachineSpec `json:"spec,omitempty"`
+}
+
+// MachineSpec is a provider-agnostic recommended machine size for a node pool.
+// plan-environment computes these abstract values (with --recommend-specs) and
+// the cattle-config generator maps them to provider-specific fields:
+//   - AWS: smallest instanceType from the catalog meeting VCPUs/MemoryGiB, plus
+//     rootSize = DiskGiB (and awsEC2Configs.volumeSize).
+//   - Harvester/vSphere: cpuCount = VCPUs, memorySize = MemoryGiB,
+//     diskSize = DiskGiB.
+type MachineSpec struct {
+	VCPUs     int `json:"vcpus"`
+	MemoryGiB int `json:"memory_gib"`
+	DiskGiB   int `json:"disk_gib"`
+	// InstanceType is the resolved provider instance type (e.g. AWS
+	// "t3.xlarge"), set during cattle-config generation when the provider uses
+	// named instance types. Empty for providers that take raw cpu/mem/disk.
+	InstanceType string `json:"instance_type,omitempty"`
+	// Rationale explains how the spec was derived (heuristic factors / LLM).
+	Rationale string `json:"rationale,omitempty"`
+	// Source is "heuristic" or "llm".
+	Source string `json:"source,omitempty"`
+}
+
+// NetworkingRequirement captures cluster networking requirements that affect
+// the environment (e.g. ACE / local cluster auth endpoint, dual-stack).
+type NetworkingRequirement struct {
+	LocalClusterAuthEndpoint bool   `json:"local_cluster_auth_endpoint,omitempty"`
+	StackPreference          string `json:"stack_preference,omitempty"`
+	ClusterCIDR              string `json:"cluster_cidr,omitempty"`
+	ServiceCIDR              string `json:"service_cidr,omitempty"`
+}
+
+// WorkloadRequirement describes a workload/deployment that tests need present.
+type WorkloadRequirement struct {
+	Kind        string `json:"kind"` // e.g. "deployment", "daemonset", "statefulset", "ingress"
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
 }

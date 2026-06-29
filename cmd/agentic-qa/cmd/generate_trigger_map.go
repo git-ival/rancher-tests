@@ -92,8 +92,8 @@ func runGenerateTriggerMap() error {
 
 	// Build parameter mapping (which params are Qase-related).
 	qaseParamMapping := map[string]string{
-		"QASE_TEST_RUN_ID":      "Run ID to report results to",
-		"QASE_REPORTER_SCRIPT":  "Reporter script that uploads results",
+		"QASE_TEST_RUN_ID":     "Run ID to report results to",
+		"QASE_REPORTER_SCRIPT": "Reporter script that uploads results",
 	}
 
 	// Build Jenkinsfile mapping.
@@ -102,8 +102,8 @@ func runGenerateTriggerMap() error {
 	mapping := types.JenkinsTriggerMapping{
 		Metadata: types.MappingMetadata{
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-		GeneratedBy: "agentic-qa " + genTriggerMapCommandName,
-		Version:     mappingFileVersion,
+			GeneratedBy: "agentic-qa " + genTriggerMapCommandName,
+			Version:     mappingFileVersion,
 		},
 		JobMappings:          filteredJobs,
 		TagToJob:             tagToJob,

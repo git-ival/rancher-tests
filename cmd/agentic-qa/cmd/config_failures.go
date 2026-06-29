@@ -32,7 +32,7 @@ func init() {
 	f.StringVar(&cfTriageResults, triageResultsFlag, "", "Path to triage_results.json (required)")
 	f.StringVar(&cfPipelineConfig, pipelineConfigFlag, "", "Path to pipeline config")
 	f.StringVar(&cfTriggerMapping, triggerMappingFlag, "", "Path to jenkins_trigger_mapping.json")
-	f.IntVar(&cfMaxReruns, cfMaxRerunsFlag, 2, "Maximum number of reruns per test")
+	f.IntVar(&cfMaxReruns, cfMaxRerunsFlag, defaultMaxReruns, "Maximum number of reruns per test")
 	f.StringVar(&cfTestsRepo, testsRepoFlag, defaultTestsRepo, "Tests repository (owner/repo)")
 	f.BoolVar(&cfAutoCreatePRs, autoCreatePRsFlag, false, "Automatically create GitHub PRs for guards")
 	f.StringVar(&cfOutputFile, outputFileFlag, "", "Path to write config_actions.json (required)")
@@ -99,13 +99,13 @@ Respond with JSON: {"action": "rerun|guard", "reasoning": "string"}`
 				Reasoning string `json:"reasoning"`
 			}
 
-			if err := haikuClient.CompleteJSON(ctx, decisionPrompt, userMsg, 1024, &decision); err != nil {
+			if err := haikuClient.CompleteJSON(ctx, decisionPrompt, userMsg, llmMaxTokensDecision, &decision); err != nil {
 				logrus.Warnf("LLM decision failed for %s: %v, defaulting to rerun", issue.TestName, err)
-				decision.Action = "rerun"
+				decision.Action = types.CFActionRerun
 			}
 
 			switch decision.Action {
-			case "rerun":
+			case types.CFActionRerun:
 				if jenkinsURL == "" || dryRun || localTest {
 					if localTest {
 						logrus.Infof("Local-test mode: skipping Jenkins rerun for %s", issue.TestName)
@@ -120,8 +120,8 @@ Respond with JSON: {"action": "rerun|guard", "reasoning": "string"}`
 					continue
 				}
 
-			jenkinsUser := os.Getenv(jenkinsUserEnvVar)
-			jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
+				jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+				jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 				jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 
 				folder, jobName := splitConfigJobName(issue.TestName, triggerMapping)
@@ -146,7 +146,7 @@ Respond with JSON: {"action": "rerun|guard", "reasoning": "string"}`
 					})
 				}
 
-			case "guard":
+			case types.CFActionGuard:
 				logrus.Infof("Generating guard for %s", issue.TestName)
 
 				sonnetClient, err := newLLMClient(ctx, sonnetModel)
@@ -176,7 +176,7 @@ Respond with JSON:
 					Description  string `json:"description"`
 				}
 
-				if err := sonnetClient.CompleteJSON(ctx, guardPrompt, guardMsg, 4096, &guard); err != nil {
+				if err := sonnetClient.CompleteJSON(ctx, guardPrompt, guardMsg, llmMaxTokensGuard, &guard); err != nil {
 					logrus.Errorf("Guard generation failed for %s: %v", issue.TestName, err)
 					continue
 				}

@@ -189,7 +189,7 @@ If an identified test has no mapped qase_cases, identify fails with an error.`,
 		logrus.Info("Calling LLM to identify relevant tests...")
 
 		var result types.IdentifiedTests
-		if err := llmClient.CompleteJSON(ctx, systemPrompt, userMessage, 4096, &result); err != nil {
+		if err := llmClient.CompleteJSON(ctx, systemPrompt, userMessage, llmMaxTokensIdentify, &result); err != nil {
 			return fmt.Errorf("LLM identification failed: %w", err)
 		}
 
@@ -247,7 +247,7 @@ Changed files:
 
 Diff:
 %s`, prInfo.Number, prInfo.Title, prInfo.Author, prInfo.Branch, prInfo.Base, prInfo.URL,
-		string(filesJSON), truncate(diff, 50000))
+		string(filesJSON), truncate(diff, identifyDiffMaxLen))
 
 	if additionalContext != "" {
 		msg += fmt.Sprintf("\n\nAdditional context:\n%s", additionalContext)

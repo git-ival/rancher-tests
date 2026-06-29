@@ -15,6 +15,14 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
+const (
+	// jenkinsHTTPTimeout is the timeout for individual Jenkins API HTTP requests.
+	jenkinsHTTPTimeout = 30 * time.Second
+	// jenkinsRetryAttempts is the number of attempts before giving up on a
+	// Jenkins API call.
+	jenkinsRetryAttempts = 3
+)
+
 // Client wraps the Jenkins REST API.
 type Client struct {
 	baseURL    string
@@ -59,7 +67,7 @@ type buildResponse struct {
 func NewClient(baseURL, user, token string) *Client {
 	c := &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
-		httpClient: &http.Client{Timeout: 30 * time.Second},
+		httpClient: &http.Client{Timeout: jenkinsHTTPTimeout},
 		user:       user,
 		token:      token,
 	}
@@ -150,7 +158,7 @@ func (c *Client) TriggerBuild(ctx context.Context, folder, jobName string, param
 		queueID = id
 		return nil
 	},
-		retry.Attempts(3),
+		retry.Attempts(jenkinsRetryAttempts),
 		retry.Context(ctx),
 		retry.LastErrorOnly(true),
 	)
@@ -216,7 +224,7 @@ func (c *Client) GetQueueBuildNumber(ctx context.Context, queueID int) (int, err
 		buildNumber = qr.Executable.Number
 		return nil
 	},
-		retry.Attempts(3),
+		retry.Attempts(jenkinsRetryAttempts),
 		retry.Context(ctx),
 		retry.LastErrorOnly(true),
 	)
@@ -274,7 +282,7 @@ func (c *Client) GetBuildStatus(ctx context.Context, folder, jobName string, bui
 		}
 		return nil
 	},
-		retry.Attempts(3),
+		retry.Attempts(jenkinsRetryAttempts),
 		retry.Context(ctx),
 		retry.LastErrorOnly(true),
 	)
