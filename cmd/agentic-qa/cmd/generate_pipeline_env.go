@@ -42,6 +42,15 @@ value that the pipeline needs:
   • GitHub Copilot bot username
   • GitHub issue label
   • Project display name injected into LLM prompts
+  • Cattle-config template: rancher server, cloud credentials, provider
+    machine configs, registries and SSH — used by plan-environment to render a
+    complete cattle-config.yaml with ${VAR} placeholders for secrets
+  • Instance-type catalog: candidate provider instance types used by
+    plan-environment --recommend-specs to size nodes
+  • Sizing policy: named profiles (minimal/balanced/ha) with HA floors and cost
+    caps applied by plan-environment --sizing-profile to upstream/downstream
+  • Upstream cluster config: provider/distro/version and qa-infra terraform.tfvars
+    template for the recommended Rancher management cluster
 
 The file is intentionally excluded from VCS (.gitignore covers *_env.json).
 Supply it to the pipeline at runtime via the --pipeline-env flag, or as a

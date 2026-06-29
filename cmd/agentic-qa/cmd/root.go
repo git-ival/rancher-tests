@@ -33,18 +33,19 @@ var (
 
 const (
 	// Command names.
-	genFeatureMapCommandName  = "generate-feature-map"
-	genTriggerMapCommandName  = "generate-trigger-map"
-	genPipelineEnvCommandName = "generate-pipeline-env"
-	identifyCommandName       = "identify"
-	triggerCommandName        = "trigger"
-	waitCommandName           = "wait"
-	analyzeCommandName        = "analyze"
-	defectsCommandName        = "defects"
-	configFailuresCommandName = "config-failures"
-	cleanupCommandName        = "cleanup"
-	validateCommandName       = "validate"
-	completionCommandName     = "completion"
+	genFeatureMapCommandName   = "generate-feature-map"
+	genTriggerMapCommandName   = "generate-trigger-map"
+	genPipelineEnvCommandName  = "generate-pipeline-env"
+	identifyCommandName        = "identify"
+	planEnvironmentCommandName = "plan-environment"
+	triggerCommandName         = "trigger"
+	waitCommandName            = "wait"
+	analyzeCommandName         = "analyze"
+	defectsCommandName         = "defects"
+	configFailuresCommandName  = "config-failures"
+	cleanupCommandName         = "cleanup"
+	validateCommandName        = "validate"
+	completionCommandName      = "completion"
 
 	// Root persistent flag names.
 	providerFlag       = "provider"
@@ -119,6 +120,32 @@ const (
 // localTestPrefix is prepended to all artifact titles/names when --local-test is set.
 const localTestPrefix = "[LOCAL-TEST] "
 
+const (
+	// LLM max-token budgets. Higher budgets are used for tasks that produce
+	// more text (guard code, test identification); lower budgets for structured
+	// JSON decisions that are always short.
+	llmMaxTokensIdentify   = 4096
+	llmMaxTokensGuard      = 4096
+	llmMaxTokensTriage     = 2048
+	llmMaxTokensEnvInfer   = 2048
+	llmMaxTokensDecision   = 1024
+	llmMaxTokensSpecRefine = 1024
+
+	// identifyDiffMaxLen is the maximum number of characters of a PR diff that
+	// is sent to the LLM. Longer diffs are truncated.
+	identifyDiffMaxLen = 50000
+
+	// defaultPollIntervalSeconds is the default interval between Jenkins build
+	// status polls.
+	defaultPollIntervalSeconds = 120
+
+	// millisecondsPerMinute converts a duration in ms to minutes.
+	millisecondsPerMinute = 60000.0
+
+	// defaultMaxReruns is the default maximum number of reruns allowed per test.
+	defaultMaxReruns = 2
+)
+
 var rootCmd = &cobra.Command{
 	Use:   "agentic-qa",
 	Short: "Agentic QA pipeline CLI for Rancher test automation",
@@ -127,13 +154,14 @@ var rootCmd = &cobra.Command{
 	2. generate-trigger-map - Generate a Jenkins trigger mapping from test case metadata
 	3. generate-pipeline-env - Generate a pipeline_env.json template with organization-specific defaults
 	4. identify  - Identify tests relevant to a PR
-  5. trigger   - Trigger Jenkins test jobs
-  6. wait      - Wait for test completion
-  7. analyze   - Triage test failures
-  8. defects   - Handle defects (issues, PRs)
-  9. config-failures - Handle configuration failures
-  10. cleanup   - Clean up pipeline-created resources
-  11. validate  - Validate credential connectivity`,
+  5. plan-environment - Determine the minimum viable test environment for the identified tests
+  6. trigger   - Trigger Jenkins test jobs
+  7. wait      - Wait for test completion
+  8. analyze   - Triage test failures
+  9. defects   - Handle defects (issues, PRs)
+  10. config-failures - Handle configuration failures
+  11. cleanup   - Clean up pipeline-created resources
+  12. validate  - Validate credential connectivity`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		// Load pipeline_env.json if provided.  generate-pipeline-env and the
 		// other generate-* commands may run without it (they either produce the
@@ -151,6 +179,12 @@ var rootCmd = &cobra.Command{
 		switch cmd.Name() {
 		case genFeatureMapCommandName, genTriggerMapCommandName, genPipelineEnvCommandName, validateCommandName, completionCommandName, "help":
 			return nil
+		case planEnvironmentCommandName:
+			// plan-environment only needs LLM credentials when its LLM fallback
+			// is enabled (i.e. --static-only is NOT set).
+			if planEnvStaticOnly {
+				return nil
+			}
 		}
 
 		switch provider {
