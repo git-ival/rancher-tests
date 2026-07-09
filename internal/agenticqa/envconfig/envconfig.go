@@ -121,6 +121,47 @@ type PipelineEnv struct {
 	// Upstream holds the settings used to render the upstream Rancher
 	// management cluster recommendation into qa-infra-automation input files.
 	Upstream UpstreamConfig `json:"upstream"`
+
+	// ---- Chart resource footprints -----------------------------------------
+
+	// ChartSizing configures how plan-environment resolves the resource
+	// footprint of Helm charts the tests install (used to size downstream
+	// clusters). It carries the live chart source and a curated fallback
+	// catalog.
+	ChartSizing ChartSizingConfig `json:"chart_sizing"`
+}
+
+// ChartSizingConfig configures resolution of Helm-chart resource footprints.
+type ChartSizingConfig struct {
+	// Source describes where to read authoritative chart resource annotations.
+	Source ChartSource `json:"source"`
+	// Catalog is the curated fallback footprint per chart name, used when the
+	// live source lacks the requests annotation (many charts do) or is
+	// unavailable. Keys are canonical chart names (e.g. "rancher-monitoring").
+	Catalog map[string]ChartFootprintSpec `json:"catalog,omitempty"`
+}
+
+// ChartSource locates the Rancher charts repository for live footprint lookup.
+type ChartSource struct {
+	// LocalPath, when set (or auto-detected), points at a local checkout of
+	// rancher/charts. Preferred over network access for speed/determinism.
+	LocalPath string `json:"local_path,omitempty"`
+	// BaseRawURL is the raw-content base for the rancher/charts repo used when
+	// no local checkout is available, e.g.
+	// "https://raw.githubusercontent.com/rancher/charts". The release branch is
+	// appended per the target Rancher version.
+	BaseRawURL string `json:"base_raw_url,omitempty"`
+	// DefaultRancherMinor is the Rancher "major.minor" (e.g. "2.14") assumed
+	// when the upstream Rancher version is an unresolved ${VAR}. Determines the
+	// release-vX.Y branch and which chart versions are considered.
+	DefaultRancherMinor string `json:"default_rancher_minor,omitempty"`
+}
+
+// ChartFootprintSpec is a curated chart resource footprint (request totals).
+type ChartFootprintSpec struct {
+	CPUMillis int `json:"cpu_millis"`
+	MemoryMiB int `json:"memory_mib"`
+	DiskGiB   int `json:"disk_gib,omitempty"`
 }
 
 // SizingPolicyConfig is the set of named sizing profiles and the default one to
@@ -164,6 +205,13 @@ type SizingTargetSpec struct {
 	MaxNodeVCPUs     int `json:"max_node_vcpus,omitempty"`
 	MaxNodeMemoryGiB int `json:"max_node_memory_gib,omitempty"`
 	MaxNodeDiskGiB   int `json:"max_node_disk_gib,omitempty"`
+	// PreferredFamilies is an ordered list of instance-family prefixes the
+	// instance-type selector should prefer for this target (e.g. ["t3a","t3"]
+	// for cost-conscious profiles, ["m5","c5","r5"] for "performance"). The
+	// selector picks the cheapest fitting type from the first family that has a
+	// fit; if none fit it falls back to any family. Empty means "any family,
+	// cheapest first". Only effective with --recommend-specs.
+	PreferredFamilies []string `json:"preferred_families,omitempty"`
 }
 
 // UpstreamConfig holds the settings for the upstream Rancher management cluster
@@ -261,6 +309,16 @@ type InstanceType struct {
 	Name      string `json:"name"`
 	VCPUs     int    `json:"vcpus"`
 	MemoryGiB int    `json:"memory_gib"`
+	// Family is the instance family prefix (e.g. "t3a", "m5"). Used by sizing
+	// profiles to express a preference for cheaper general-purpose families
+	// (t3a/t3) by default and compute/memory-optimised families (m5/c5/r5) for
+	// the "performance" profile. Empty in legacy catalogs (selection then falls
+	// back to cost/size ordering).
+	Family string `json:"family,omitempty"`
+	// CostRank is a relative hourly-cost rank (lower = cheaper) used to break
+	// ties between instance types of equal size. It is a relative ordinal, not
+	// a real price. Zero in legacy catalogs (treated as "unranked").
+	CostRank int `json:"cost_rank,omitempty"`
 }
 
 // ProviderMachineConfig is a provider's machineConfigs block. OuterFields are
@@ -340,32 +398,82 @@ func MachineListKeyForProvider(provider string) string {
 }
 
 // SelectInstanceType returns the smallest catalog instance type for the given
-// provider whose VCPUs and MemoryGiB both meet the requested minimums.
-// "Smallest" is ranked by (vCPUs, memoryGiB, name). Returns ("", false) when
-// the provider has no catalog or no entry satisfies the request; the caller
-// should then fall back to the template's machine-config placeholder.
+// provider whose VCPUs and MemoryGiB both meet the requested minimums, with no
+// family preference. Kept for backward compatibility; new callers should use
+// SelectInstanceTypeForSpec to honour a sizing profile's PreferredFamilies.
 func (t CattleConfigTemplate) SelectInstanceType(provider string, minVCPUs, minMemoryGiB int) (InstanceType, bool) {
+	return t.SelectInstanceTypeForSpec(provider, minVCPUs, minMemoryGiB, nil)
+}
+
+// SelectInstanceTypeForSpec returns the cheapest catalog instance type for the
+// given provider whose VCPUs and MemoryGiB both meet the requested minimums,
+// honouring an ordered list of preferred instance families.
+//
+// Selection algorithm:
+//  1. Filter the catalog to entries meeting the minimums.
+//  2. If preferredFamilies is non-empty, walk the families in order and pick
+//     the first family tier that has at least one fitting entry; selection is
+//     then restricted to that family. If none of the preferred families fit,
+//     fall back to all fitting entries (any family) so a plan is still produced.
+//  3. Within the chosen set, rank by (CostRank, vCPUs, memoryGiB, name) so the
+//     cheapest sufficient type wins, with deterministic tie-breaks.
+//
+// Returns ("", false) when the provider has no catalog or no entry satisfies
+// the request; the caller should then fall back to the template placeholder.
+func (t CattleConfigTemplate) SelectInstanceTypeForSpec(provider string, minVCPUs, minMemoryGiB int, preferredFamilies []string) (InstanceType, bool) {
 	catalog := t.InstanceTypeCatalog[strings.ToLower(provider)]
 	if len(catalog) == 0 {
 		return InstanceType{}, false
 	}
-	best := InstanceType{}
-	found := false
+
+	// Collect all entries that meet the resource minimums.
+	var fitting []InstanceType
 	for _, it := range catalog {
-		if it.VCPUs < minVCPUs || it.MemoryGiB < minMemoryGiB {
-			continue
-		}
-		if !found || lessInstanceType(it, best) {
-			best = it
-			found = true
+		if it.VCPUs >= minVCPUs && it.MemoryGiB >= minMemoryGiB {
+			fitting = append(fitting, it)
 		}
 	}
-	return best, found
+	if len(fitting) == 0 {
+		return InstanceType{}, false
+	}
+
+	// Restrict to the first preferred family that has a fitting entry.
+	candidates := fitting
+	for _, fam := range preferredFamilies {
+		fam = strings.ToLower(strings.TrimSpace(fam))
+		if fam == "" {
+			continue
+		}
+		var inFamily []InstanceType
+		for _, it := range fitting {
+			if strings.ToLower(it.Family) == fam {
+				inFamily = append(inFamily, it)
+			}
+		}
+		if len(inFamily) > 0 {
+			candidates = inFamily
+			break
+		}
+	}
+
+	best := candidates[0]
+	for _, it := range candidates[1:] {
+		if lessInstanceType(it, best) {
+			best = it
+		}
+	}
+	return best, true
 }
 
-// lessInstanceType ranks instance types by vCPUs, then memory, then name so
-// selection is deterministic and picks the smallest sufficient type.
+// lessInstanceType ranks instance types by cost (CostRank, lower=cheaper), then
+// vCPUs, then memory, then name so selection is deterministic and picks the
+// cheapest sufficient type. A zero CostRank (legacy/unranked) sorts after
+// ranked entries so explicitly-ranked cheap types are preferred.
 func lessInstanceType(a, b InstanceType) bool {
+	ra, rb := costRankOrInf(a.CostRank), costRankOrInf(b.CostRank)
+	if ra != rb {
+		return ra < rb
+	}
 	if a.VCPUs != b.VCPUs {
 		return a.VCPUs < b.VCPUs
 	}
@@ -373,6 +481,15 @@ func lessInstanceType(a, b InstanceType) bool {
 		return a.MemoryGiB < b.MemoryGiB
 	}
 	return a.Name < b.Name
+}
+
+// costRankOrInf maps an unranked (zero) CostRank to a large sentinel so ranked
+// entries sort ahead of unranked ones.
+func costRankOrInf(rank int) int {
+	if rank <= 0 {
+		return 1 << 30
+	}
+	return rank
 }
 
 // IsEmpty reports whether the cattle-config template carries no usable content.
@@ -577,6 +694,7 @@ func Generate() *PipelineEnv {
 		CattleConfig:       generateCattleConfigTemplate(),
 		SizingPolicy:       generateSizingPolicy(),
 		Upstream:           generateUpstreamConfig(),
+		ChartSizing:        generateChartSizing(),
 	}
 }
 
@@ -593,25 +711,45 @@ func generateSizingPolicy() SizingPolicyConfig {
 		DefaultProfile: types.SizingProfileMinimal,
 		Profiles: map[string]SizingProfile{
 			types.SizingProfileMinimal: {
-				// All zero: no floors, no caps — minimum viable as derived.
-				Upstream:   SizingTargetSpec{},
-				Downstream: SizingTargetSpec{},
+				// No floors/caps — minimum viable as derived. Cheapest families.
+				Upstream:   SizingTargetSpec{PreferredFamilies: types.CostConsciousFamilies},
+				Downstream: SizingTargetSpec{PreferredFamilies: types.CostConsciousFamilies},
 			},
 			types.SizingProfileBalanced: {
-				Upstream:   SizingTargetSpec{MinAllRoles: 1},
-				Downstream: SizingTargetSpec{MinAllRoles: 1, MinWorker: 1},
+				Upstream:   SizingTargetSpec{MinAllRoles: 1, PreferredFamilies: types.CostConsciousFamilies},
+				Downstream: SizingTargetSpec{MinAllRoles: 1, MinWorker: 1, PreferredFamilies: types.CostConsciousFamilies},
 			},
 			types.SizingProfileHA: {
 				Upstream: SizingTargetSpec{
-					MinAllRoles:    3,
-					EnforceOddEtcd: true,
+					MinAllRoles:       3,
+					EnforceOddEtcd:    true,
+					PreferredFamilies: types.CostConsciousFamilies,
 				},
 				Downstream: SizingTargetSpec{
-					MinEtcd:         3,
-					MinControlPlane: 2,
-					MinWorker:       2,
-					MinAllRoles:     3,
-					EnforceOddEtcd:  true,
+					MinEtcd:           3,
+					MinControlPlane:   2,
+					MinWorker:         2,
+					MinAllRoles:       3,
+					EnforceOddEtcd:    true,
+					PreferredFamilies: types.CostConsciousFamilies,
+				},
+			},
+			types.SizingProfilePerformance: {
+				// High-load suites: prefer non-burstable performance families and
+				// allow larger per-node sizes. Modest worker floor so perf suites
+				// aren't single-worker. HA-style etcd is left to the ha profile.
+				Upstream: SizingTargetSpec{
+					MinAllRoles:       1,
+					PreferredFamilies: types.PerformanceFamilies,
+					MaxNodeVCPUs:      16,
+					MaxNodeMemoryGiB:  64,
+				},
+				Downstream: SizingTargetSpec{
+					MinAllRoles:       1,
+					MinWorker:         2,
+					PreferredFamilies: types.PerformanceFamilies,
+					MaxNodeVCPUs:      16,
+					MaxNodeMemoryGiB:  64,
 				},
 			},
 		},
@@ -659,6 +797,47 @@ func generateUpstreamConfig() UpstreamConfig {
 // section.
 func GenerateSizingPolicy() SizingPolicyConfig {
 	return generateSizingPolicy()
+}
+
+// generateChartSizing returns the default chart-sizing config: a live source
+// (local checkout preferred, else rancher/charts raw GitHub) plus a curated
+// fallback catalog for the heavy charts whose Chart.yaml lacks the
+// catalog.cattle.io/requests-* annotations. Footprints are conservative
+// request totals (over-estimating is safe for sizing).
+func generateChartSizing() ChartSizingConfig {
+	return ChartSizingConfig{
+		Source: ChartSource{
+			BaseRawURL:          "https://raw.githubusercontent.com/rancher/charts",
+			DefaultRancherMinor: "2.14",
+		},
+		Catalog: map[string]ChartFootprintSpec{
+			// Annotated upstream too, but included for offline use.
+			"rancher-monitoring": {CPUMillis: 4500, MemoryMiB: 4000, DiskGiB: 50},
+			"rancher-istio":      {CPUMillis: 710, MemoryMiB: 2314, DiskGiB: 10},
+			"rancher-logging":    {CPUMillis: 1000, MemoryMiB: 2048, DiskGiB: 10},
+			// Unannotated heavy charts — curated estimates.
+			"longhorn":                 {CPUMillis: 1500, MemoryMiB: 2048, DiskGiB: 40},
+			"neuvector":                {CPUMillis: 1000, MemoryMiB: 2048, DiskGiB: 10},
+			"rancher-cis-benchmark":    {CPUMillis: 500, MemoryMiB: 512, DiskGiB: 5},
+			"rancher-compliance":       {CPUMillis: 500, MemoryMiB: 512, DiskGiB: 5},
+			"rancher-gatekeeper":       {CPUMillis: 500, MemoryMiB: 512, DiskGiB: 5},
+			"rancher-backup":           {CPUMillis: 500, MemoryMiB: 512, DiskGiB: 10},
+			"rancher-alerting-drivers": {CPUMillis: 250, MemoryMiB: 256, DiskGiB: 5},
+		},
+	}
+}
+
+// GenerateChartSizing returns the default chart-sizing config. Exposed so
+// callers can fall back to it when a loaded pipeline_env.json omits the
+// chart_sizing section.
+func GenerateChartSizing() ChartSizingConfig {
+	return generateChartSizing()
+}
+
+// IsEmpty reports whether the chart-sizing config carries no usable content
+// (e.g. a pipeline_env.json predating the chart_sizing section).
+func (c ChartSizingConfig) IsEmpty() bool {
+	return c.Source.BaseRawURL == "" && c.Source.LocalPath == "" && len(c.Catalog) == 0
 }
 
 // GenerateUpstreamConfig returns the default upstream config. Exposed so callers
@@ -779,23 +958,36 @@ func generateCattleConfigTemplate() CattleConfigTemplate {
 		DefaultNodeProviderByProvider: map[string]string{
 			types.ProviderAWS: "ec2",
 		},
-		// A small default AWS catalog (general-purpose + compute/memory
-		// optimised) used by --recommend-specs to map abstract specs to a
-		// concrete instanceType. Operators can extend or restrict this list.
+		// A small default AWS catalog used by --recommend-specs to map abstract
+		// specs to a concrete instanceType. CostRank is a relative ordinal
+		// (lower = cheaper): the burstable AMD t3a family is cheapest, then
+		// burstable t3, then general-purpose m5, compute-optimised c5, and
+		// memory-optimised r5. Sizing profiles steer selection toward families
+		// via PreferredFamilies. Operators can extend or restrict this list.
 		InstanceTypeCatalog: map[string][]InstanceType{
 			types.ProviderAWS: {
-				{Name: "t3.medium", VCPUs: 2, MemoryGiB: 4},
-				{Name: "t3.large", VCPUs: 2, MemoryGiB: 8},
-				{Name: "t3.xlarge", VCPUs: 4, MemoryGiB: 16},
-				{Name: "t3.2xlarge", VCPUs: 8, MemoryGiB: 32},
-				{Name: "m5.large", VCPUs: 2, MemoryGiB: 8},
-				{Name: "m5.xlarge", VCPUs: 4, MemoryGiB: 16},
-				{Name: "m5.2xlarge", VCPUs: 8, MemoryGiB: 32},
-				{Name: "m5.4xlarge", VCPUs: 16, MemoryGiB: 64},
-				{Name: "c5.xlarge", VCPUs: 4, MemoryGiB: 8},
-				{Name: "c5.2xlarge", VCPUs: 8, MemoryGiB: 16},
-				{Name: "r5.xlarge", VCPUs: 4, MemoryGiB: 32},
-				{Name: "r5.2xlarge", VCPUs: 8, MemoryGiB: 64},
+				// t3a (AMD burstable) — cheapest general-purpose tier.
+				{Name: "t3a.medium", VCPUs: 2, MemoryGiB: 4, Family: "t3a", CostRank: 10},
+				{Name: "t3a.large", VCPUs: 2, MemoryGiB: 8, Family: "t3a", CostRank: 11},
+				{Name: "t3a.xlarge", VCPUs: 4, MemoryGiB: 16, Family: "t3a", CostRank: 12},
+				{Name: "t3a.2xlarge", VCPUs: 8, MemoryGiB: 32, Family: "t3a", CostRank: 13},
+				// t3 (Intel burstable) — slightly pricier than t3a.
+				{Name: "t3.medium", VCPUs: 2, MemoryGiB: 4, Family: "t3", CostRank: 20},
+				{Name: "t3.large", VCPUs: 2, MemoryGiB: 8, Family: "t3", CostRank: 21},
+				{Name: "t3.xlarge", VCPUs: 4, MemoryGiB: 16, Family: "t3", CostRank: 22},
+				{Name: "t3.2xlarge", VCPUs: 8, MemoryGiB: 32, Family: "t3", CostRank: 23},
+				// m5 (general-purpose, non-burstable) — performance baseline.
+				{Name: "m5.large", VCPUs: 2, MemoryGiB: 8, Family: "m5", CostRank: 40},
+				{Name: "m5.xlarge", VCPUs: 4, MemoryGiB: 16, Family: "m5", CostRank: 41},
+				{Name: "m5.2xlarge", VCPUs: 8, MemoryGiB: 32, Family: "m5", CostRank: 42},
+				{Name: "m5.4xlarge", VCPUs: 16, MemoryGiB: 64, Family: "m5", CostRank: 43},
+				// c5 (compute-optimised).
+				{Name: "c5.xlarge", VCPUs: 4, MemoryGiB: 8, Family: "c5", CostRank: 50},
+				{Name: "c5.2xlarge", VCPUs: 8, MemoryGiB: 16, Family: "c5", CostRank: 51},
+				{Name: "c5.4xlarge", VCPUs: 16, MemoryGiB: 32, Family: "c5", CostRank: 52},
+				// r5 (memory-optimised).
+				{Name: "r5.xlarge", VCPUs: 4, MemoryGiB: 32, Family: "r5", CostRank: 60},
+				{Name: "r5.2xlarge", VCPUs: 8, MemoryGiB: 64, Family: "r5", CostRank: 61},
 			},
 		},
 	}

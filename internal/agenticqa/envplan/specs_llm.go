@@ -67,6 +67,18 @@ func BuildSpecRefinementUserMessage(g types.EnvironmentGroup) string {
 			roles, p.Quantity, spec.VCPUs, spec.MemoryGiB, spec.DiskGiB)
 	}
 
+	if len(g.Charts) > 0 {
+		b.WriteString("\nHelm charts installed by the tests (dominant resource driver):\n")
+		for _, c := range g.Charts {
+			if c.Footprint != nil {
+				fmt.Fprintf(&b, "- %s: ~%dm CPU, ~%d MiB mem (%s)\n",
+					c.Name, c.Footprint.CPUMillis, c.Footprint.MemoryMiB, c.Footprint.Source)
+			} else {
+				fmt.Fprintf(&b, "- %s: footprint unknown\n", c.Name)
+			}
+		}
+	}
+
 	if len(g.Workloads) > 0 {
 		b.WriteString("\nWorkloads deployed by the tests:\n")
 		for _, w := range g.Workloads {
@@ -76,7 +88,7 @@ func BuildSpecRefinementUserMessage(g types.EnvironmentGroup) string {
 			}
 			fmt.Fprintf(&b, "- %s %s: %s\n", w.Kind, name, w.Description)
 		}
-	} else {
+	} else if len(g.Charts) == 0 {
 		b.WriteString("\nNo workloads detected.\n")
 	}
 

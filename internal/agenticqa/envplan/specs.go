@@ -64,28 +64,104 @@ var workloadWeight = map[string]int{
 // ComputeSpecs assigns a heuristic MachineSpec to every node pool in the
 // cluster, sizing workers/all-roles pools according to the group's workloads.
 // It mutates the pools' Spec fields and returns the cluster for chaining.
+//
+// Backward-compatible wrapper: sizes by workloads only (no charts).
 func ComputeSpecs(cluster types.ClusterRequirement, workloads []types.WorkloadRequirement) types.ClusterRequirement {
+	return ComputeSpecsWithCharts(cluster, workloads, nil)
+}
+
+// ComputeSpecsWithCharts is ComputeSpecs plus Helm-chart footprints. Charts are
+// the dominant resource driver (test workload helpers rarely set container
+// requests), so their resolved request totals are added to the worker /
+// all-roles pools on top of the role baseline and the (minor) workload-count
+// term. Unresolved charts contribute a conservative default footprint so an
+// undetected-footprint chart still bumps sizing.
+func ComputeSpecsWithCharts(cluster types.ClusterRequirement, workloads []types.WorkloadRequirement, charts []types.ChartRequirement) types.ClusterRequirement {
 	weight := workloadPressure(workloads)
+	chartVCPUs, chartMemGiB, chartDiskGiB, chartNames := chartPressure(charts)
 
 	for i := range cluster.NodePools {
 		p := &cluster.NodePools[i]
 		spec := baselineFor(*p)
 
-		// Workload pressure only affects pools that schedule workloads
-		// (worker or all-roles); dedicated etcd/controlplane pools are not
-		// scaled by workload count.
+		// Workload pressure and chart footprints only affect pools that
+		// schedule workloads (worker or all-roles); dedicated etcd/controlplane
+		// pools are not scaled by them.
 		if p.Worker {
 			spec.VCPUs += weight / cpuPerNWorkloads
 			spec.MemoryGiB += weight * perWorkloadMemGiB
 			spec.DiskGiB += weight * perWorkloadDiskGiB
+
+			spec.VCPUs += chartVCPUs
+			spec.MemoryGiB += chartMemGiB
+			spec.DiskGiB += chartDiskGiB
 		}
 
 		clampSpec(&spec)
 		spec.Source = types.SpecSourceHeuristic
-		spec.Rationale = rationaleFor(*p, weight)
+		spec.Rationale = rationaleForFull(*p, weight, chartNames, chartVCPUs, chartMemGiB)
 		p.Spec = &spec
 	}
 	return cluster
+}
+
+// Chart footprint sizing constants.
+const (
+	// chartHeadroomNumerator/Denominator add scheduling headroom on top of the
+	// raw chart request totals (charts also have limits/bursting and the node
+	// runs system pods). 3/2 = +50%.
+	chartHeadroomNumerator   = 3
+	chartHeadroomDenominator = 2
+	// defaultUnresolvedChartCPUMillis/MemMiB/DiskGiB are assumed for a detected
+	// chart whose footprint could not be resolved from annotations/catalog/LLM.
+	// Conservative-but-non-trivial so an unknown chart still raises sizing.
+	defaultUnresolvedChartCPUMillis = 1000
+	defaultUnresolvedChartMemMiB    = 1024
+	defaultUnresolvedChartDiskGiB   = 10
+	millisPerVCPU                   = 1000
+)
+
+// chartPressure converts the resolved chart footprints into additional whole
+// vCPUs / GiB memory / GiB disk to add to worker pools, applying headroom and
+// rounding up. Returns the increments and the contributing chart names.
+func chartPressure(charts []types.ChartRequirement) (vcpus, memGiB, diskGiB int, names []string) {
+	if len(charts) == 0 {
+		return 0, 0, 0, nil
+	}
+	totalCPUMillis, totalMemMiB, totalDiskGiB := 0, 0, 0
+	for _, c := range charts {
+		fp := c.Footprint
+		if fp == nil {
+			totalCPUMillis += defaultUnresolvedChartCPUMillis
+			totalMemMiB += defaultUnresolvedChartMemMiB
+			totalDiskGiB += defaultUnresolvedChartDiskGiB
+		} else {
+			totalCPUMillis += fp.CPUMillis
+			totalMemMiB += fp.MemoryMiB
+			totalDiskGiB += fp.DiskGiB
+		}
+		names = append(names, c.Name)
+	}
+	// Apply headroom.
+	totalCPUMillis = totalCPUMillis * chartHeadroomNumerator / chartHeadroomDenominator
+	totalMemMiB = totalMemMiB * chartHeadroomNumerator / chartHeadroomDenominator
+	totalDiskGiB = totalDiskGiB * chartHeadroomNumerator / chartHeadroomDenominator
+
+	vcpus = ceilDiv(totalCPUMillis, millisPerVCPU)
+	memGiB = ceilDiv(totalMemMiB, giBToMiBSpecs)
+	diskGiB = totalDiskGiB
+	return vcpus, memGiB, diskGiB, names
+}
+
+// giBToMiBSpecs converts GiB↔MiB for chart memory math (kept local to specs).
+const giBToMiBSpecs = 1024
+
+// ceilDiv returns ceil(a/b) for non-negative ints (b>0).
+func ceilDiv(a, b int) int {
+	if b <= 0 {
+		return 0
+	}
+	return (a + b - 1) / b
 }
 
 // baselineFor returns the role-based baseline spec for a single pool.
@@ -129,6 +205,19 @@ func rationaleFor(p types.NodeRequirement, weight int) string {
 		return fmt.Sprintf("baseline for %s role + workload pressure %d", role, weight)
 	}
 	return fmt.Sprintf("baseline for %s role", role)
+}
+
+// rationaleForFull explains a worker pool's spec including chart contributions.
+func rationaleForFull(p types.NodeRequirement, weight int, chartNames []string, chartVCPUs, chartMemGiB int) string {
+	role := roleLabel(p)
+	if !p.Worker {
+		return fmt.Sprintf("baseline for %s role", role)
+	}
+	if len(chartNames) == 0 {
+		return fmt.Sprintf("baseline for %s role + workload pressure %d", role, weight)
+	}
+	return fmt.Sprintf("baseline for %s role + workload pressure %d + charts [%s] (+%d vCPU, +%d GiB)",
+		role, weight, strings.Join(chartNames, ", "), chartVCPUs, chartMemGiB)
 }
 
 func roleLabel(p types.NodeRequirement) string {

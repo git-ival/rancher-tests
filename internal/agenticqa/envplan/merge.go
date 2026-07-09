@@ -25,6 +25,7 @@ type Requirement struct {
 	File      string
 	Cluster   types.ClusterRequirement
 	Workloads []types.WorkloadRequirement
+	Charts    []types.ChartRequirement
 	DerivedBy string
 	Jobs      []string
 	BuildTags []string
@@ -214,6 +215,22 @@ func mergeWorkloads(sets ...[]types.WorkloadRequirement) []types.WorkloadRequire
 	return out
 }
 
+// mergeCharts de-duplicates charts by name.
+func mergeCharts(sets ...[]types.ChartRequirement) []types.ChartRequirement {
+	seen := map[string]struct{}{}
+	var out []types.ChartRequirement
+	for _, set := range sets {
+		for _, c := range set {
+			if _, ok := seen[c.Name]; ok {
+				continue
+			}
+			seen[c.Name] = struct{}{}
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
 // BuildPlan turns per-file requirements into an EnvironmentPlan. It first
 // attempts the single-environment strategy (merging everything). If merging
 // produces hard conflicts, it falls back to per-group environments keyed by
@@ -243,10 +260,12 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 		jobSet := map[string]struct{}{}
 		tagSet := map[string]struct{}{}
 		var workloadSets [][]types.WorkloadRequirement
+		var chartSets [][]types.ChartRequirement
 		for _, r := range reqs {
 			g.TestFiles = append(g.TestFiles, r.File)
 			g.DerivedBy[r.File] = r.DerivedBy
 			workloadSets = append(workloadSets, r.Workloads)
+			chartSets = append(chartSets, r.Charts)
 			for _, j := range r.Jobs {
 				jobSet[j] = struct{}{}
 			}
@@ -255,6 +274,7 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 			}
 		}
 		g.Workloads = mergeWorkloads(workloadSets...)
+		g.Charts = mergeCharts(chartSets...)
 		g.JenkinsJobs = sortedKeys(jobSet)
 		g.BuildTags = sortedKeys(tagSet)
 		sort.Strings(g.TestFiles)
@@ -321,10 +341,12 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 			jobSet := map[string]struct{}{}
 			tagSet := map[string]struct{}{}
 			var workloadSets [][]types.WorkloadRequirement
+			var chartSets [][]types.ChartRequirement
 			for _, m := range members {
 				g.TestFiles = append(g.TestFiles, m.File)
 				g.DerivedBy[m.File] = m.DerivedBy
 				workloadSets = append(workloadSets, m.Workloads)
+				chartSets = append(chartSets, m.Charts)
 				for _, j := range m.Jobs {
 					jobSet[j] = struct{}{}
 				}
@@ -333,6 +355,7 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 				}
 			}
 			g.Workloads = mergeWorkloads(workloadSets...)
+			g.Charts = mergeCharts(chartSets...)
 			g.JenkinsJobs = sortedKeys(jobSet)
 			g.BuildTags = sortedKeys(tagSet)
 			sort.Strings(g.TestFiles)

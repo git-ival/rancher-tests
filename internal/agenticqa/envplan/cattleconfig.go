@@ -69,7 +69,10 @@ var (
 // The provider is taken from the group's derived cluster requirement, falling
 // back to the template's DefaultProvider. Only that provider's credential and
 // machine-config blocks are emitted.
-func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigTemplate) ([]byte, error) {
+// preferredFamilies is the ordered instance-family preference from the active
+// sizing profile (e.g. ["t3a","t3"]); it steers AWS instance-type selection
+// toward cheaper families. Pass nil for no preference (cheapest-overall).
+func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigTemplate, preferredFamilies []string) ([]byte, error) {
 	cluster := g.Cluster
 	root := yamlMap()
 
@@ -129,7 +132,7 @@ func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigT
 		key := envconfig.MachineConfigsKeyForProvider(provider)
 		listKey := envconfig.MachineListKeyForProvider(provider)
 		if key != "" && listKey != "" {
-			addChild(root, key, machineConfigNodePerPool(mc, listKey, cluster.NodePools, provider, tmpl))
+			addChild(root, key, machineConfigNodePerPool(mc, listKey, cluster.NodePools, provider, tmpl, preferredFamilies))
 		}
 	}
 
@@ -318,6 +321,7 @@ func machineConfigNodePerPool(
 	pools []types.NodeRequirement,
 	provider string,
 	tmpl envconfig.CattleConfigTemplate,
+	preferredFamilies []string,
 ) *yaml.Node {
 	n := yamlMap()
 	for _, k := range sortedKeysStr(mc.OuterFields) {
@@ -327,7 +331,7 @@ func machineConfigNodePerPool(
 	seq := yamlSeq()
 	for _, pool := range pools {
 		roles := poolRoles(pool)
-		overrides := machineSpecOverrides(provider, pool.Spec, tmpl)
+		overrides := machineSpecOverrides(provider, pool.Spec, tmpl, preferredFamilies)
 		merged := mergeFields(mc.MachineEntry, overrides)
 
 		entry := yamlMap()
@@ -428,14 +432,14 @@ func effectiveSpec(pools []types.NodeRequirement) *types.MachineSpec {
 //   - Harvester/vSphere: cpuCount + memorySize + diskSize (raw values).
 //
 // Returns nil when spec is nil so the template placeholders are kept verbatim.
-func machineSpecOverrides(provider string, spec *types.MachineSpec, tmpl envconfig.CattleConfigTemplate) map[string]string {
+func machineSpecOverrides(provider string, spec *types.MachineSpec, tmpl envconfig.CattleConfigTemplate, preferredFamilies []string) map[string]string {
 	if spec == nil {
 		return nil
 	}
 	out := map[string]string{}
 	switch strings.ToLower(provider) {
 	case types.ProviderAWS:
-		if it, ok := tmpl.SelectInstanceType(provider, spec.VCPUs, spec.MemoryGiB); ok {
+		if it, ok := tmpl.SelectInstanceTypeForSpec(provider, spec.VCPUs, spec.MemoryGiB, preferredFamilies); ok {
 			out["instanceType"] = it.Name
 			spec.InstanceType = it.Name
 		}
@@ -450,7 +454,7 @@ func machineSpecOverrides(provider string, spec *types.MachineSpec, tmpl envconf
 		out["diskSize"] = fmt.Sprintf("%d", spec.DiskGiB*giBToMiB)
 	default:
 		// Unknown provider: try instanceType selection, else nothing.
-		if it, ok := tmpl.SelectInstanceType(provider, spec.VCPUs, spec.MemoryGiB); ok {
+		if it, ok := tmpl.SelectInstanceTypeForSpec(provider, spec.VCPUs, spec.MemoryGiB, preferredFamilies); ok {
 			out["instanceType"] = it.Name
 			spec.InstanceType = it.Name
 		}

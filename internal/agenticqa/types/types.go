@@ -180,9 +180,27 @@ const (
 
 // Sizing profile names used by plan-environment --sizing-profile.
 const (
-	SizingProfileMinimal  = "minimal"
-	SizingProfileBalanced = "balanced"
-	SizingProfileHA       = "ha"
+	SizingProfileMinimal     = "minimal"
+	SizingProfileBalanced    = "balanced"
+	SizingProfileHA          = "ha"
+	SizingProfilePerformance = "performance"
+)
+
+// Instance-family preference tiers used by sizing profiles. Cost-conscious
+// profiles prefer burstable general-purpose families; the performance profile
+// prefers non-burstable compute/memory-optimised families.
+var (
+	// CostConsciousFamilies is the default family preference: cheapest first.
+	CostConsciousFamilies = []string{"t3a", "t3"}
+	// PerformanceFamilies prefers non-burstable, performance-oriented families.
+	PerformanceFamilies = []string{"m5", "c5", "r5"}
+)
+
+// Chart footprint source labels (ChartFootprint.Source).
+const (
+	ChartFootprintSourceAnnotation = "chart-annotation"
+	ChartFootprintSourceCatalog    = "catalog"
+	ChartFootprintSourceLLM        = "llm"
 )
 
 // Sizing policy targets: which cluster a profile sub-spec applies to.
@@ -480,6 +498,10 @@ type EnvironmentGroup struct {
 	Cluster ClusterRequirement `json:"cluster"`
 	// Workloads are deployments/resources that must be present for the tests.
 	Workloads []WorkloadRequirement `json:"workloads,omitempty"`
+	// Charts are Helm charts the tests install. These dominate cluster resource
+	// sizing (their footprints are resolved from the Rancher charts repo /
+	// curated catalog) and are recorded here for auditability.
+	Charts []ChartRequirement `json:"charts,omitempty"`
 	// CattleConfigPath is the path to the generated cattle-config.yaml for this
 	// group, relative to the plan output directory. Empty if generation was
 	// disabled.
@@ -574,4 +596,32 @@ type WorkloadRequirement struct {
 	Kind        string `json:"kind"` // e.g. "deployment", "daemonset", "statefulset", "ingress"
 	Name        string `json:"name,omitempty"`
 	Description string `json:"description,omitempty"`
+}
+
+// ChartRequirement describes a Helm chart a test installs (e.g.
+// "rancher-monitoring"). Charts are the dominant driver of downstream cluster
+// resource sizing; their resource footprint is resolved separately (from the
+// Rancher charts repo's Chart.yaml annotations, a curated catalog, or the LLM).
+type ChartRequirement struct {
+	// Name is the canonical Rancher chart name (matches the rancher/charts
+	// directory name and the actions/charts name constant), e.g.
+	// "rancher-monitoring", "longhorn".
+	Name string `json:"name"`
+	// Detected records how the chart was identified (e.g. the source token), for
+	// auditing.
+	Detected string `json:"detected,omitempty"`
+	// Footprint, when resolved, is the chart's recommended resource request
+	// total folded into node sizing. Nil when unresolved.
+	Footprint *ChartFootprint `json:"footprint,omitempty"`
+}
+
+// ChartFootprint is a chart's total resource request, used to size the worker /
+// all-roles pools that host chart workloads.
+type ChartFootprint struct {
+	CPUMillis int `json:"cpu_millis"`
+	MemoryMiB int `json:"memory_mib"`
+	DiskGiB   int `json:"disk_gib,omitempty"`
+	// Source records where the footprint came from: "chart-annotation",
+	// "catalog", or "llm".
+	Source string `json:"source,omitempty"`
 }

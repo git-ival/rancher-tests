@@ -23,6 +23,7 @@ type Analysis struct {
 	Inconclusive bool
 	Cluster      types.ClusterRequirement
 	Workloads    []types.WorkloadRequirement
+	Charts       []types.ChartRequirement
 	Notes        []string
 }
 
@@ -84,6 +85,26 @@ var workloadImports = map[string]string{
 	"workloads/job":         types.WorkloadJob,
 	"ingress":               types.WorkloadIngress,
 }
+
+// chartConstants maps an actions/charts Go name-constant identifier to the
+// canonical Rancher chart name (matching the rancher/charts directory name).
+// Presence of the constant in a test source is a strong signal the test
+// installs that chart, which dominates cluster resource sizing.
+var chartConstants = map[string]string{
+	"RancherMonitoringName": "rancher-monitoring",
+	"RancherLoggingName":    "rancher-logging",
+	"RancherIstioName":      "rancher-istio",
+	"LonghornChartName":     "longhorn",
+	"CISBenchmarkName":      "rancher-cis-benchmark",
+	"NeuVectorChartName":    "neuvector",
+	"RancherGatekeeperName": "rancher-gatekeeper",
+	"RancherAlertingName":   "rancher-alerting-drivers",
+	"ComplianceName":        "rancher-compliance",
+	"RancherBackupName":     "rancher-backup",
+}
+
+// reChartConst matches charts.<ConstName> references in the source.
+var reChartConst = regexp.MustCompile(`charts\.([A-Za-z][A-Za-z0-9]*)\b`)
 
 // providerConstToName maps the Go const identifier to the cattle-config value.
 var providerConstToName = map[string]string{
@@ -224,6 +245,23 @@ func AnalyzeSource(src string) Analysis {
 		}
 	}
 
+	// --- Charts installed by the test (dominant sizing signal). ---
+	seenChart := map[string]struct{}{}
+	for _, m := range reChartConst.FindAllStringSubmatch(src, -1) {
+		name, ok := chartConstants[m[1]]
+		if !ok {
+			continue
+		}
+		if _, dup := seenChart[name]; dup {
+			continue
+		}
+		seenChart[name] = struct{}{}
+		a.Charts = append(a.Charts, types.ChartRequirement{
+			Name:     name,
+			Detected: "charts." + m[1],
+		})
+	}
+
 	// --- Windows note (affects node pools / images). ---
 	if reWindows.MatchString(src) {
 		a.Notes = append(a.Notes, "references Windows; may require Windows worker nodes")
@@ -239,7 +277,8 @@ func AnalyzeSource(src string) Analysis {
 		cluster.PSACT == "" &&
 		!cluster.Hardened &&
 		net == nil &&
-		len(a.Workloads) == 0 {
+		len(a.Workloads) == 0 &&
+		len(a.Charts) == 0 {
 		a.Inconclusive = true
 	}
 

@@ -65,6 +65,49 @@ func TestAnalyzeSource_ACE(t *testing.T) {
 	}
 }
 
+func TestAnalyzeSource_DetectsCharts(t *testing.T) {
+	src := `//go:build validation
+package charts
+import (
+	"github.com/rancher/tests/actions/charts"
+	"github.com/rancher/tests/actions/provisioninginput"
+)
+func TestMonitoring(t *testing.T) {
+	_ = provisioninginput.AllRolesMachinePool
+	chartName := charts.RancherMonitoringName
+	_ = charts.LonghornChartName
+}`
+	a := AnalyzeSource(src)
+	if a.Inconclusive {
+		t.Fatal("expected conclusive analysis")
+	}
+	names := map[string]bool{}
+	for _, c := range a.Charts {
+		names[c.Name] = true
+	}
+	if !names["rancher-monitoring"] {
+		t.Errorf("expected rancher-monitoring chart detected, got %v", a.Charts)
+	}
+	if !names["longhorn"] {
+		t.Errorf("expected longhorn chart detected, got %v", a.Charts)
+	}
+}
+
+func TestAnalyzeSource_ChartOnlyIsConclusive(t *testing.T) {
+	// A file that only references a chart (no node pools/distro) is still
+	// conclusive because charts drive sizing.
+	src := `package x
+	import "github.com/rancher/tests/actions/charts"
+	var c = charts.NeuVectorChartName`
+	a := AnalyzeSource(src)
+	if a.Inconclusive {
+		t.Fatal("chart reference should make analysis conclusive")
+	}
+	if len(a.Charts) != 1 || a.Charts[0].Name != "neuvector" {
+		t.Errorf("expected neuvector chart, got %v", a.Charts)
+	}
+}
+
 func TestAnalyzeSource_AllRolesDefaultQuantity(t *testing.T) {
 	src := `package x
 	import "github.com/rancher/tests/actions/provisioninginput"

@@ -28,6 +28,7 @@ var (
 	planEnvNoUpstream      bool
 	planEnvRecommendSpecs  bool
 	planEnvSizingProfile   string
+	planEnvChartsDir       string
 )
 
 const (
@@ -38,6 +39,7 @@ const (
 	planEnvNoUpstreamFlag    = "no-upstream"
 	planEnvRecommendFlag     = "recommend-specs"
 	planEnvSizingProfileFlag = "sizing-profile"
+	planEnvChartsDirFlag     = "charts-dir"
 
 	planEnvDefaultOutputDir = "environment-plan"
 	planEnvCattleSubdir     = "cattle-config"
@@ -58,6 +60,7 @@ func init() {
 	f.BoolVar(&planEnvNoCattleConfig, planEnvNoCattleCfgFlag, false, "Do not generate downstream cattle-config.yaml files (emit plan JSON only)")
 	f.BoolVar(&planEnvNoUpstream, planEnvNoUpstreamFlag, false, "Do not generate the upstream (Rancher management cluster) recommendation or its qa-infra artifacts")
 	f.BoolVar(&planEnvRecommendSpecs, planEnvRecommendFlag, false, "Recommend per-node machine specs (vCPU/memory/disk, instanceType) from heuristics + LLM refinement, and write them into the cattle-config")
+	f.StringVar(&planEnvChartsDir, planEnvChartsDirFlag, "", "Path to a local rancher/charts checkout (or its charts/ dir) for resolving Helm-chart resource footprints; falls back to the curated catalog when unset/unavailable")
 
 	_ = planEnvironmentCmd.MarkFlagRequired(identifiedTestsFlag)
 	_ = planEnvironmentCmd.MarkFlagRequired(outputFileFlag)
@@ -85,11 +88,15 @@ the recommended upstream Rancher management cluster (terraform.tfvars and
 ansible vars.yaml), unless --no-upstream is set.
 
 The --sizing-profile flag selects a node-sizing policy (e.g. minimal, balanced,
-ha) from pipeline_env.json. Profiles raise node counts to meet high-availability
-floors (etcd quorum, redundant control-plane/worker) and clamp resources to cost
-caps, with HA floors taking precedence over cost caps. The default profile is
-"minimal" (minimum viable, preserving historical behaviour); consider "balanced"
-or "ha" for real pipelines.
+ha, performance) from pipeline_env.json. Profiles raise node counts to meet
+high-availability floors (etcd quorum, redundant control-plane/worker) and clamp
+resources to cost caps, with HA floors taking precedence over cost caps. Each
+profile also expresses an instance-family preference: minimal/balanced/ha prefer
+cheaper burstable families (t3a, then t3), while "performance" prefers
+non-burstable compute/memory-optimised families (m5, c5, r5) and allows larger
+per-node sizes for high-load suites. The default profile is "minimal" (minimum
+viable, preserving historical behaviour); consider "balanced" or "ha" for real
+pipelines and "performance" for heavy chart-driven suites.
 
 With --recommend-specs it additionally computes recommended per-node machine
 specs (vCPU, memory, disk) from role-based heuristics scaled by the group's
@@ -158,6 +165,19 @@ memorySize/diskSize).`,
 			upstreamCfg = envconfig.GenerateUpstreamConfig()
 		}
 
+		// Resolve the chart-sizing config (used by --recommend-specs to size
+		// clusters from Helm-chart footprints). Fall back to built-in defaults
+		// when the loaded pipeline_env.json predates the chart_sizing section.
+		chartSizingCfg := env.ChartSizing
+		if planEnvRecommendSpecs && chartSizingCfg.IsEmpty() {
+			logrus.Warnf("--%s file has no \"chart_sizing\" section; falling back to built-in defaults. "+
+				"Regenerate it with `agentic-qa generate-pipeline-env` to customise chart footprints.", pipelineEnvFlag)
+			chartSizingCfg = envconfig.GenerateChartSizing()
+		}
+		if planEnvChartsDir != "" {
+			chartSizingCfg.Source.LocalPath = planEnvChartsDir
+		}
+
 		// Derived output directories under the consolidated --output-dir.
 		cattleConfigDir := filepath.Join(planEnvOutputDir, planEnvCattleSubdir)
 		upstreamDir := filepath.Join(planEnvOutputDir, planEnvUpstreamSubdir)
@@ -191,6 +211,7 @@ memorySize/diskSize).`,
 			if !analysis.Inconclusive {
 				req.Cluster = analysis.Cluster
 				req.Workloads = analysis.Workloads
+				req.Charts = analysis.Charts
 				req.DerivedBy = types.DerivedByStatic
 				staticCount++
 			} else if llmClient != nil {
@@ -212,12 +233,6 @@ memorySize/diskSize).`,
 				defaultCount++
 			}
 
-			// Compute heuristic machine specs per pool so they survive the
-			// merge (which takes the element-wise max spec per role signature).
-			if planEnvRecommendSpecs {
-				req.Cluster = envplan.ComputeSpecs(req.Cluster, req.Workloads)
-			}
-
 			reqs = append(reqs, req)
 		}
 
@@ -230,6 +245,20 @@ memorySize/diskSize).`,
 
 		logrus.Infof("Derived environment for %d test(s): %d static, %d llm, %d default → strategy=%s, %d group(s)",
 			len(reqs), staticCount, llmCount, defaultCount, plan.Strategy, len(plan.Groups))
+
+		// Compute recommended specs per group: resolve each group's merged Helm
+		// chart footprints (the dominant resource driver), then size pools from
+		// role baselines + workload pressure + chart footprints. Done per group
+		// (post-merge) because charts are group-level.
+		if planEnvRecommendSpecs {
+			resolver := envplan.NewChartFootprintResolver(chartSizingCfg, upstreamCfg.RancherVersion)
+			logrus.Infof("Using %s", resolver)
+			for i := range plan.Groups {
+				g := &plan.Groups[i]
+				resolveGroupCharts(ctx, g, resolver, llmClient, env.ProjectDisplayName)
+				g.Cluster = envplan.ComputeSpecsWithCharts(g.Cluster, g.Workloads, g.Charts)
+			}
+		}
 
 		// Optional LLM spec refinement, one call per group. The heuristic spec
 		// is the floor; the LLM may only raise it (enforced in
@@ -273,7 +302,7 @@ memorySize/diskSize).`,
 			}
 			for i := range plan.Groups {
 				g := &plan.Groups[i]
-				data, err := envplan.GenerateCattleConfig(*g, cattleTmpl)
+				data, err := envplan.GenerateCattleConfig(*g, cattleTmpl, profile.Downstream.PreferredFamilies)
 				if err != nil {
 					return fmt.Errorf("generating cattle-config for group %q: %w", g.Name, err)
 				}
@@ -290,7 +319,7 @@ memorySize/diskSize).`,
 
 		// Build and emit the upstream (Rancher management) cluster recommendation.
 		if !planEnvNoUpstream {
-			upstream, err := buildAndEmitUpstream(upstreamCfg, profile.Upstream, profileName, upstreamDir, planEnvRecommendSpecs, cattleTmpl)
+			upstream, err := buildAndEmitUpstream(upstreamCfg, profile.Upstream, profileName, upstreamDir, planEnvRecommendSpecs, cattleTmpl, profile.Upstream.PreferredFamilies)
 			if err != nil {
 				return err
 			}
@@ -316,6 +345,7 @@ func buildAndEmitUpstream(
 	profileName, upstreamDir string,
 	recommendSpecs bool,
 	cattleTmpl envconfig.CattleConfigTemplate,
+	preferredFamilies []string,
 ) (*types.UpstreamCluster, error) {
 	up := envplan.DefaultUpstreamCluster(cfg)
 
@@ -327,7 +357,7 @@ func buildAndEmitUpstream(
 		// Resolve instance types from the catalog for the upstream provider.
 		for i := range cluster.NodePools {
 			if s := cluster.NodePools[i].Spec; s != nil {
-				if it, ok := cattleTmpl.SelectInstanceType(cfg.Provider, s.VCPUs, s.MemoryGiB); ok {
+				if it, ok := cattleTmpl.SelectInstanceTypeForSpec(cfg.Provider, s.VCPUs, s.MemoryGiB, preferredFamilies); ok {
 					s.InstanceType = it.Name
 				}
 			}
@@ -398,6 +428,44 @@ func writeUpstreamArtifact(baseDir, relPath string, data []byte) error {
 		return fmt.Errorf("writing %s: %w", outPath, err)
 	}
 	return nil
+}
+
+// resolveGroupCharts resolves the resource footprint of every Helm chart in a
+// group, in place. It first uses the non-LLM tiers (local Chart.yaml
+// annotations, then the curated catalog); any charts still unresolved are sent
+// to the LLM for estimation (unless the client is nil, i.e. --static-only).
+func resolveGroupCharts(
+	ctx context.Context,
+	g *types.EnvironmentGroup,
+	resolver *envplan.ChartFootprintResolver,
+	llmClient *llm.Client,
+	projectDisplayName string,
+) {
+	if len(g.Charts) == 0 {
+		return
+	}
+	resolved, unresolved := resolver.ResolveCharts(g.Charts)
+	logrus.Infof("group %q: resolved %d/%d chart footprint(s) from annotations/catalog",
+		g.Name, resolved, len(g.Charts))
+
+	if len(unresolved) == 0 || llmClient == nil {
+		if len(unresolved) > 0 {
+			logrus.Warnf("group %q: %d chart(s) have no resolved footprint and LLM is disabled; "+
+				"using conservative defaults: %s", g.Name, len(unresolved), strings.Join(unresolved, ", "))
+		}
+		return
+	}
+
+	// LLM fallback for the remaining charts.
+	sys := envplan.BuildChartFootprintSystemPrompt(projectDisplayName)
+	user := envplan.BuildChartFootprintUserMessage(unresolved, resolver.ReleaseBranch())
+	var res envplan.ChartFootprintLLMResult
+	if err := llmClient.CompleteJSON(ctx, sys, user, llmMaxTokensSpecRefine, &res); err != nil {
+		logrus.Warnf("group %q: chart footprint LLM estimation failed (using defaults): %v", g.Name, err)
+		return
+	}
+	n := envplan.ApplyChartFootprintLLM(g.Charts, res)
+	logrus.Infof("group %q: LLM estimated %d chart footprint(s)", g.Name, n)
 }
 
 // jenkinsJobsForTest resolves the Jenkins jobs that will run a given test, used

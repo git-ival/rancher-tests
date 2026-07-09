@@ -35,7 +35,7 @@ func TestGenerateCattleConfig_Valid(t *testing.T) {
 		},
 	}
 
-	data, err := GenerateCattleConfig(g, testTemplate())
+	data, err := GenerateCattleConfig(g, testTemplate(), nil)
 	if err != nil {
 		t.Fatalf("GenerateCattleConfig error: %v", err)
 	}
@@ -131,7 +131,7 @@ func TestGenerateCattleConfig_K3sVersionKey(t *testing.T) {
 			TotalNodes:       1,
 		},
 	}
-	data, err := GenerateCattleConfig(g, testTemplate())
+	data, err := GenerateCattleConfig(g, testTemplate(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +168,7 @@ func TestGenerateCattleConfig_WithRecommendedSpecs(t *testing.T) {
 			TotalNodes:   6,
 		},
 	}
-	data, err := GenerateCattleConfig(g, testTemplate())
+	data, err := GenerateCattleConfig(g, testTemplate(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestGenerateCattleConfig_NoSpecsKeepsPlaceholders(t *testing.T) {
 			TotalNodes: 1,
 		},
 	}
-	data, err := GenerateCattleConfig(g, testTemplate())
+	data, err := GenerateCattleConfig(g, testTemplate(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestGenerateCattleConfig_EnvsubstRoundTrip(t *testing.T) {
 			TotalNodes:       1,
 		},
 	}
-	data, err := GenerateCattleConfig(g, testTemplate())
+	data, err := GenerateCattleConfig(g, testTemplate(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
