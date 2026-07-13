@@ -378,7 +378,7 @@ func buildAndEmitUpstream(
 
 	tfvarsPath, clusterVarsPath, rancherVarsPath := envplan.UpstreamArtifactPaths(cfg)
 
-	// terraform.tfvars (AWS only).
+	// terraform.tfvars + tofu.env.example (AWS only).
 	if envplan.SupportsTfvars(cfg) {
 		data, err := envplan.GenerateTerraformTfvars(up, cfg)
 		if err != nil {
@@ -388,6 +388,16 @@ func buildAndEmitUpstream(
 			return nil, err
 		}
 		up.ArtifactPaths = append(up.ArtifactPaths, tfvarsPath)
+
+		envData, err := envplan.GenerateTofuEnvFile(up, cfg)
+		if err != nil {
+			return nil, fmt.Errorf("generating upstream tofu.env.example: %w", err)
+		}
+		envPath := envplan.TofuEnvFilePath(cfg)
+		if err := writeUpstreamArtifact(upstreamDir, envPath, envData); err != nil {
+			return nil, err
+		}
+		up.ArtifactPaths = append(up.ArtifactPaths, envPath)
 	} else {
 		logrus.Warnf("upstream provider %q has no qa-infra cluster_nodes tofu module; skipping terraform.tfvars (ansible vars still emitted)", cfg.Provider)
 	}
