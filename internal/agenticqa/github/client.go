@@ -26,6 +26,10 @@ type PRInfo struct {
 	Base   string
 	Number int
 	URL    string
+	// Merged reports whether the PR has been merged into its base branch.
+	Merged bool
+	// Only meaningful once the PR is merged (or, for open PRs, once GitHub has computed a test-merge commit).
+	MergeCommitSHA string
 }
 
 // Client wraps the GitHub API.
@@ -34,9 +38,14 @@ type Client struct {
 	token  string
 }
 
-// NewClient creates a GitHub client from a personal access token.
+// NewClient creates a GitHub client from a personal access token. An empty
+// token yields an unauthenticated client (usable for public-repo reads at
+// GitHub's lower unauthenticated rate limit).
 func NewClient(token string) *Client {
-	c := gh.NewClient(nil).WithAuthToken(token)
+	c := gh.NewClient(nil)
+	if token != "" {
+		c = c.WithAuthToken(token)
+	}
 	return &Client{
 		client: c,
 		token:  token,
@@ -139,9 +148,119 @@ func (c *Client) GetPRInfo(ctx context.Context, owner, repo string, prNumber int
 	if pr.HTMLURL != nil {
 		info.URL = *pr.HTMLURL
 	}
+	if pr.Merged != nil {
+		info.Merged = *pr.Merged
+	}
+	if pr.MergeCommitSHA != nil {
+		info.MergeCommitSHA = *pr.MergeCommitSHA
+	}
 
-	logrus.Debugf("GetPRInfo: %s/%s#%d title=%q author=%s", owner, repo, prNumber, info.Title, info.Author)
+	logrus.Debugf("GetPRInfo: %s/%s#%d title=%q author=%s merged=%v", owner, repo, prNumber, info.Title, info.Author, info.Merged)
 	return info, nil
+}
+
+// ListTags returns every tag name in the repository.
+func (c *Client) ListTags(ctx context.Context, owner, repo string) ([]string, error) {
+	var allTags []string
+	opts := &gh.ListOptions{PerPage: githubPageSize}
+
+	for {
+		tags, resp, err := c.client.Repositories.ListTags(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("listing tags: %w", err)
+		}
+
+		for _, t := range tags {
+			if t.Name != nil {
+				allTags = append(allTags, *t.Name)
+			}
+		}
+
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+
+	logrus.Debugf("ListTags: %s/%s has %d tags", owner, repo, len(allTags))
+	return allTags, nil
+}
+
+// CompareContainsCommit reports whether base contains head, i.e. head is an
+// ancestor of (or identical to) base. It uses the GitHub compare API: a
+// status of "identical" or "behind" (from head's perspective relative to
+// base) means base already contains head's commit.
+func (c *Client) CompareContainsCommit(ctx context.Context, owner, repo, base, head string) (bool, error) {
+	comparison, _, err := c.client.Repositories.CompareCommits(ctx, owner, repo, base, head, nil)
+	if err != nil {
+		return false, fmt.Errorf("comparing %s...%s: %w", base, head, err)
+	}
+
+	status := comparison.GetStatus()
+	contains := status == "identical" || status == "behind"
+	logrus.Debugf("CompareContainsCommit: %s/%s %s...%s status=%s contains=%v", owner, repo, base, head, status, contains)
+	return contains, nil
+}
+
+// GetBranchHeadSHA returns the current HEAD commit SHA of a branch.
+func (c *Client) GetBranchHeadSHA(ctx context.Context, owner, repo, branch string) (string, error) {
+	ref, _, err := c.client.Git.GetRef(ctx, owner, repo, "refs/heads/"+branch)
+	if err != nil {
+		return "", fmt.Errorf("getting ref for branch %q: %w", branch, err)
+	}
+	if ref.Object == nil || ref.Object.SHA == nil {
+		return "", fmt.Errorf("branch %q ref has no SHA", branch)
+	}
+	return *ref.Object.SHA, nil
+}
+
+// ReleaseAsset describes a downloadable asset attached to a GitHub release.
+type ReleaseAsset struct {
+	Name               string
+	BrowserDownloadURL string
+}
+
+// GetReleaseByTag returns the release notes body and asset list for the
+// published release at the given tag. ok is false when the tag exists but has
+// no published release (a bare git tag), which is common for non-GA/internal
+// tags.
+func (c *Client) GetReleaseByTag(ctx context.Context, owner, repo, tag string) (body string, assets []ReleaseAsset, ok bool, err error) {
+	rel, resp, err := c.client.Repositories.GetReleaseByTag(ctx, owner, repo, tag)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return "", nil, false, nil
+		}
+		return "", nil, false, fmt.Errorf("getting release for tag %q: %w", tag, err)
+	}
+
+	if rel.Body != nil {
+		body = *rel.Body
+	}
+	for _, a := range rel.Assets {
+		var asset ReleaseAsset
+		if a.Name != nil {
+			asset.Name = *a.Name
+		}
+		if a.BrowserDownloadURL != nil {
+			asset.BrowserDownloadURL = *a.BrowserDownloadURL
+		}
+		assets = append(assets, asset)
+	}
+
+	logrus.Debugf("GetReleaseByTag: %s/%s@%s body=%d bytes, %d asset(s)", owner, repo, tag, len(body), len(assets))
+	return body, assets, true, nil
+}
+
+// BranchExists reports whether a branch exists in the repository.
+func (c *Client) BranchExists(ctx context.Context, owner, repo, branch string) (bool, error) {
+	_, resp, err := c.client.Repositories.GetBranch(ctx, owner, repo, branch, 0)
+	if err != nil {
+		if resp != nil && resp.StatusCode == http.StatusNotFound {
+			return false, nil
+		}
+		return false, fmt.Errorf("getting branch %q: %w", branch, err)
+	}
+	return true, nil
 }
 
 // CreateIssue creates a GitHub issue and returns its HTML URL.
