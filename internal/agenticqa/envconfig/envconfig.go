@@ -129,6 +129,47 @@ type PipelineEnv struct {
 	// clusters). It carries the live chart source and a curated fallback
 	// catalog.
 	ChartSizing ChartSizingConfig `json:"chart_sizing"`
+
+	// ---- Version resolution -------------------------------------------------
+
+	// VersionResolution configures plan-environment's --resolve-versions
+	// flag: where to look up Rancher/Kubernetes/cert-manager versions and
+	// which env-var overrides always win.
+	VersionResolution VersionResolutionConfig `json:"version_resolution"`
+}
+
+// VersionResolutionConfig configures --resolve-versions on plan-environment.
+// See internal/agenticqa/envversions for the resolution algorithm.
+type VersionResolutionConfig struct {
+	// KDMBaseRawURL is the raw-content base for rancher/kontainer-driver-metadata,
+	// e.g. "https://raw.githubusercontent.com/rancher/kontainer-driver-metadata".
+	// Defaults to the upstream rancher org when empty.
+	KDMBaseRawURL string `json:"kdm_base_raw_url,omitempty"`
+	// KDMReleasesURL is the base URL for the packaged KDM data.json served by
+	// releases.rancher.com (the source Rancher's image build uses), tried as a
+	// fallback when KDMBaseRawURL fails. Defaults to
+	// "https://releases.rancher.com/kontainer-driver-metadata" when empty.
+	KDMReleasesURL string `json:"kdm_releases_url,omitempty"`
+	// DefaultMinor is the Rancher "major.minor" (e.g. "2.15") used as a last
+	// resort when neither package/Dockerfile nor the PR base ref yields one.
+	DefaultMinor string `json:"default_minor,omitempty"`
+	// RancherRawBaseURL is the raw-content base for rancher/rancher, used to
+	// read chart/Chart.yaml's kubeVersion constraint. Defaults to the
+	// upstream rancher org when empty.
+	RancherRawBaseURL string `json:"rancher_raw_base_url,omitempty"`
+	// CertManagerReleasesURL is the GitHub API releases-list URL for
+	// cert-manager/cert-manager, used as the terminal cert-manager fallback.
+	// Defaults to the upstream cert-manager org when empty.
+	CertManagerReleasesURL string `json:"cert_manager_releases_url,omitempty"`
+	// Overrides maps an env-var name (e.g. "RANCHER_VERSION", "RKE2_VERSION",
+	// "K3S_VERSION", "CERT_MANAGER_VERSION", "RANCHER_IMAGE_TAG") to a value
+	// that always wins over any resolved value. The actual OS environment
+	// variable of the same name, when set, takes precedence over this
+	// config-file default.
+	Overrides map[string]string `json:"overrides,omitempty"`
+	// IncludePrereleasesDefault is the default for --include-prereleases when
+	// the flag is not explicitly passed.
+	IncludePrereleasesDefault bool `json:"include_prereleases_default,omitempty"`
 }
 
 // ChartSizingConfig configures resolution of Helm-chart resource footprints.
@@ -238,6 +279,13 @@ type UpstreamConfig struct {
 	RancherImageTag    string `json:"rancher_image_tag"`
 	CertManagerVersion string `json:"cert_manager_version"`
 	FQDN               string `json:"fqdn"`
+	// RancherChartRepo/RancherChartRepoURL override the Helm repo
+	// (name/URL) qa-infra-automation's rancher-playbook.yml adds and installs
+	// from, for Rancher versions not published to its default "rancher-latest"
+	// channel (e.g. alpha prereleases, which live only in "rancher-alpha").
+	// Left empty to use the playbook's built-in default.
+	RancherChartRepo    string `json:"rancher_chart_repo,omitempty"`
+	RancherChartRepoURL string `json:"rancher_chart_repo_url,omitempty"`
 	// BaselineVolumeSizeGiB is the default per-node volume size for the upstream
 	// nodes when no recommended spec overrides it.
 	BaselineVolumeSizeGiB int `json:"baseline_volume_size_gib"`
@@ -695,6 +743,19 @@ func Generate() *PipelineEnv {
 		SizingPolicy:       generateSizingPolicy(),
 		Upstream:           generateUpstreamConfig(),
 		ChartSizing:        generateChartSizing(),
+		VersionResolution:  generateVersionResolution(),
+	}
+}
+
+// generateVersionResolution returns the default --resolve-versions settings:
+// public upstream sources, no overrides, prereleases excluded by default.
+func generateVersionResolution() VersionResolutionConfig {
+	return VersionResolutionConfig{
+		KDMBaseRawURL:             "https://raw.githubusercontent.com/rancher/kontainer-driver-metadata",
+		KDMReleasesURL:            "https://releases.rancher.com/kontainer-driver-metadata",
+		RancherRawBaseURL:         "https://raw.githubusercontent.com/rancher/rancher",
+		CertManagerReleasesURL:    "https://api.github.com/repos/cert-manager/cert-manager/releases",
+		IncludePrereleasesDefault: false,
 	}
 }
 
