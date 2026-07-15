@@ -2,9 +2,20 @@ package types
 
 // IdentifiedTests is the output of the "identify" step.
 type IdentifiedTests struct {
-	PRNumber        int         `json:"pr_number"`
-	PRTitle         string      `json:"pr_title"`
-	PRURL           string      `json:"pr_url"`
+	PRNumber int    `json:"pr_number"`
+	PRTitle  string `json:"pr_title"`
+	PRURL    string `json:"pr_url"`
+	// Repo is the "owner/repo" slug the PR was fetched from. Persisted so
+	// downstream steps (e.g. plan-environment --resolve-versions) can resolve
+	// GitHub state without requiring the repo to be re-specified.
+	Repo string `json:"repo,omitempty"`
+	// Only meaningful once Merged is true or the PR is mergeable. Used to find the earliest release tag containing the PR.
+	MergeCommitSHA string `json:"merge_commit_sha,omitempty"`
+	// Merged reports whether the PR has been merged into its base branch.
+	Merged bool `json:"merged"`
+	// BaseRef is the PR's base branch (e.g. "release-v2.14"). Used to scope
+	// candidate release tags and to locate the in-development fallback branch.
+	BaseRef         string      `json:"base_ref,omitempty"`
 	FeatureAreas    []string    `json:"feature_areas"`
 	ChangedFiles    []string    `json:"changed_files"`
 	Tests           []TestEntry `json:"tests"`
@@ -451,6 +462,47 @@ type EnvironmentPlan struct {
 	// topology. It is singular for the whole plan and is populated unless
 	// upstream recommendation is disabled (--no-upstream).
 	Upstream *UpstreamCluster `json:"upstream,omitempty"`
+	// VersionResolution records how each concrete version value was derived
+	// when --resolve-versions was passed to plan-environment. Nil when
+	// version resolution was not requested (versions remain ${VAR}
+	// placeholders in that case).
+	VersionResolution *VersionResolution `json:"version_resolution,omitempty"`
+}
+
+// VersionResolution is the record for --resolve-versions: it
+// captures the resolved value and source tier for every version-bearing
+// field, for auditability and debugging.
+type VersionResolution struct {
+	RancherVersion     ResolvedVersion `json:"rancher_version"`
+	RancherImageTag    ResolvedVersion `json:"rancher_image_tag"`
+	CertManagerVersion ResolvedVersion `json:"cert_manager_version"`
+	// RancherMinor is the resolved Rancher "major.minor" (e.g. "2.15") that
+	// drives KDM/chart branch selection and the in-development image tag.
+	RancherMinor string `json:"rancher_minor,omitempty"`
+	// KubernetesVersionByDistro maps a distro (rke2/k3s) to its resolved
+	// Kubernetes version, covering both the upstream management cluster and
+	// the downstream cattle-config default.
+	KubernetesVersionByDistro map[string]ResolvedVersion `json:"kubernetes_version_by_distro,omitempty"`
+	// RancherChartRepoName/RancherChartRepoURL override the Helm repository
+	// used to install Rancher when the resolved version isn't published to
+	// qa-infra-automation's default "rancher-latest" channel (e.g. alpha
+	// prereleases, which are only published to the "rancher-alpha" channel).
+	// Both are empty when the default channel is correct for the resolved
+	// version.
+	RancherChartRepoName string `json:"rancher_chart_repo_name,omitempty"`
+	RancherChartRepoURL  string `json:"rancher_chart_repo_url,omitempty"`
+}
+
+// ResolvedVersion carries a single resolved version value and the tier that
+// produced it.
+type ResolvedVersion struct {
+	Value string `json:"value"`
+	// Source is one of: "override", "tag-compare", "kdm", "release-notes",
+	// "images-txt", "upstream-latest", "in-development", "placeholder".
+	Source string `json:"source"`
+	// Detail carries extra human-readable context (e.g. the release branch or
+	// tag examined), useful for debugging.
+	Detail string `json:"detail,omitempty"`
 }
 
 // UpstreamCluster describes the recommended topology and settings for the
