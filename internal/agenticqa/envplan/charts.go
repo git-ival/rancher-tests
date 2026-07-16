@@ -56,7 +56,16 @@ var reRancherMinor = regexp.MustCompile(`(\d+)\.(\d+)`)
 // used. It auto-detects a local rancher/charts checkout from the configured
 // LocalPath or common sibling locations of the workspace.
 func NewChartFootprintResolver(cfg envconfig.ChartSizingConfig, rancherVersion string) *ChartFootprintResolver {
-	minor := parseRancherMinor(rancherVersion)
+	return NewChartFootprintResolverForMinor(cfg, parseRancherMinor(rancherVersion))
+}
+
+// NewChartFootprintResolverForMinor builds a resolver from an already-resolved
+// Rancher "major.minor" (e.g. "2.15"). An empty minor falls back to the
+// config's DefaultRancherMinor. Prefer this over NewChartFootprintResolver
+// when the minor has been authoritatively resolved (e.g. by envversions), so
+// the chart branch tracks the true target Rancher version rather than a
+// version placeholder.
+func NewChartFootprintResolverForMinor(cfg envconfig.ChartSizingConfig, minor string) *ChartFootprintResolver {
 	if minor == "" {
 		minor = cfg.Source.DefaultRancherMinor
 	}

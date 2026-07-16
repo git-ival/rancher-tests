@@ -487,4 +487,33 @@ func TestGenerateRancherVarsYAML(t *testing.T) {
 			t.Errorf("rancher vars missing %q: %v", key, parsed)
 		}
 	}
+	// rancher_chart_repo/_url must be entirely absent (not present-but-empty)
+	// when unset, since the playbook's Jinja `default()` filter only
+	// substitutes for an undefined variable, not an empty string.
+	for _, key := range []string{"rancher_chart_repo", "rancher_chart_repo_url"} {
+		if _, ok := parsed[key]; ok {
+			t.Errorf("rancher vars should omit %q when unset, got %v", key, parsed[key])
+		}
+	}
+}
+
+func TestGenerateRancherVarsYAML_ChartRepoOverride(t *testing.T) {
+	cfg := envconfig.GenerateUpstreamConfig()
+	cfg.RancherChartRepo = "rancher-alpha"
+	cfg.RancherChartRepoURL = "https://releases.rancher.com/server-charts/alpha"
+
+	data, err := GenerateRancherVarsYAML(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed map[string]any
+	if err := yaml.Unmarshal(data, &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if parsed["rancher_chart_repo"] != "rancher-alpha" {
+		t.Errorf("rancher_chart_repo = %v, want rancher-alpha", parsed["rancher_chart_repo"])
+	}
+	if parsed["rancher_chart_repo_url"] != "https://releases.rancher.com/server-charts/alpha" {
+		t.Errorf("rancher_chart_repo_url = %v, want the alpha channel URL", parsed["rancher_chart_repo_url"])
+	}
 }

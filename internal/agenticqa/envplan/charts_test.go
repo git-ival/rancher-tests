@@ -80,6 +80,24 @@ func TestParseRancherMinor(t *testing.T) {
 	}
 }
 
+func TestNewChartFootprintResolverForMinor(t *testing.T) {
+	cfg := envconfig.GenerateChartSizing()
+	cfg.Source.DefaultRancherMinor = "2.14"
+
+	// An explicit resolved minor is used verbatim (release branch tracks it),
+	// overriding the config default.
+	r := NewChartFootprintResolverForMinor(cfg, "2.15")
+	if got := r.ReleaseBranch(); got != "release-v2.15" {
+		t.Errorf("ReleaseBranch() = %q, want release-v2.15", got)
+	}
+
+	// An empty minor falls back to the config default.
+	r = NewChartFootprintResolverForMinor(cfg, "")
+	if got := r.ReleaseBranch(); got != "release-v2.14" {
+		t.Errorf("ReleaseBranch() = %q, want release-v2.14 (config default)", got)
+	}
+}
+
 func TestResolveFromCatalogFallback(t *testing.T) {
 	cfg := envconfig.GenerateChartSizing()
 	r := NewChartFootprintResolver(cfg, "v2.14.0")
