@@ -51,9 +51,7 @@ func init() {
 	rootCmd.AddCommand(triggerCmd)
 }
 
-// createQaseRun creates a Qase test run using the REST API and explicit case
-// IDs from the generated mapping output. This is intentionally strict: we do
-// not fall back to MCP or include-all-cases behavior.
+// createQaseRun creates a REST run using only mapped case IDs.
 func createQaseRun(ctx context.Context, project, name, description string, caseIDs []int) (int, error) {
 	qaseToken := os.Getenv(qaseApiTokenEnvVar)
 	if qaseToken == "" {
@@ -80,9 +78,7 @@ func collectProjectCaseIDs(identified types.IdentifiedTests, project string) []i
 		}
 		t := identified.Tests[idx]
 
-		// Prefer QaseCasesByProject (per-project validated IDs) over the
-		// flat QaseCaseIDs list. This ensures we only send case IDs that
-		// actually belong to this specific project.
+		// Use project-specific IDs to avoid cross-project cases.
 		if t.QaseCasesByProject != nil {
 			for _, caseID := range t.QaseCasesByProject[project] {
 				if caseID <= 0 {
@@ -95,8 +91,7 @@ func collectProjectCaseIDs(identified types.IdentifiedTests, project string) []i
 				caseIDs = append(caseIDs, caseID)
 			}
 		} else {
-			// Legacy fallback: use flat QaseCaseIDs (pre-existing identified_tests.json
-			// files that don't have the per-project breakdown).
+			// Support legacy files with flat case IDs.
 			for _, caseID := range t.QaseCaseIDs {
 				if caseID <= 0 {
 					continue
@@ -144,9 +139,7 @@ func lookupJobConfig(triggerMapping map[string]any, jobName string) (map[string]
 	return jobConfig, true
 }
 
-// resolveTriggerJobs determines the Jenkins jobs to trigger based on the identified tests and the trigger mapping.
-// It first considers the explicitly recommended jobs, then falls back to mapping recommended tags to jobs.
-// Only jobs that have a corresponding entry in the trigger mapping are included.
+// resolveTriggerJobs maps recommended jobs or tags to configured Jenkins jobs.
 func resolveTriggerJobs(identified types.IdentifiedTests, triggerMapping map[string]any) []string {
 	jobs := make([]string, 0, len(identified.RecommendedJobs))
 	seen := map[string]struct{}{}
@@ -213,7 +206,6 @@ var triggerCmd = &cobra.Command{
 			return fmt.Errorf("no mapped Jenkins jobs found from identified tests: recommended_jobs=%v recommended_tags=%v", identified.RecommendedJobs, identified.RecommendedTags)
 		}
 
-		// runMap maps Qase project code → run ID for all runs created this pipeline.
 		runMap := map[string]int{}
 
 		if !dryRun {
@@ -225,9 +217,6 @@ var triggerCmd = &cobra.Command{
 				baseRunName = localTestPrefix + baseRunName
 			}
 
-			// Determine which projects to create runs for.
-			// If --qase-project is set, restrict to that single project;
-			// otherwise create a run for every project that has identified cases.
 			projectsToRun := identified.QaseProjects
 			if qaseProject != "" {
 				projectsToRun = []string{qaseProject}
@@ -263,7 +252,6 @@ var triggerCmd = &cobra.Command{
 			}
 		}
 
-		// Trigger Jenkins jobs
 		jenkinsURL := triggerJenkinsURL
 		if jenkinsURL == "" {
 			jenkinsURL = os.Getenv(jenkinsURLEnvVar)
@@ -295,7 +283,6 @@ var triggerCmd = &cobra.Command{
 					}
 				}
 
-				// Look up folder/job from trigger mapping
 				jobConfig, _ := lookupJobConfig(triggerMapping, job)
 				folder, _ := jobConfig["folder"].(string)
 				jobName, _ := jobConfig["job_name"].(string)
@@ -339,7 +326,6 @@ var triggerCmd = &cobra.Command{
 			}
 		}
 
-		// Build the QaseRuns slice from runMap for multi-project tracking.
 		var qaseRuns []types.TriggeredQaseRun
 		for proj, id := range runMap {
 			qaseRuns = append(qaseRuns, types.TriggeredQaseRun{Project: proj, RunID: id})
@@ -353,7 +339,7 @@ var triggerCmd = &cobra.Command{
 			Jobs:        triggeredJobs,
 			TriggeredAt: time.Now().UTC().Format(time.RFC3339),
 		}
-		// Backward compat: populate legacy single-run fields from the first run.
+		// Preserve legacy single-run fields.
 		if len(qaseRuns) > 0 {
 			result.QaseRunID = &qaseRuns[0].RunID
 			result.QaseProject = qaseRuns[0].Project

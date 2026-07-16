@@ -95,9 +95,7 @@ type CompletedJob struct {
 	LogURL          string  `json:"log_url,omitempty"`
 }
 
-// ---------------------------------------------------------------------------
 // Domain constants shared across packages
-// ---------------------------------------------------------------------------
 
 // Node role names used in machine-pool configuration and role-signature logic.
 const (
@@ -354,9 +352,7 @@ type CleanupResult struct {
 	Errors             []string `json:"errors"`
 }
 
-// ---------------------------------------------------------------------------
 // Feature Test Mapping types (output of generate-feature-map)
-// ---------------------------------------------------------------------------
 
 // FeatureTestMapping is the top-level structure of feature_test_mapping.json.
 type FeatureTestMapping struct {
@@ -400,9 +396,7 @@ type QaseCase struct {
 	AutomationTestName string `json:"automation_test_name"`
 }
 
-// ---------------------------------------------------------------------------
 // Jenkins Trigger Mapping types (output of generate-trigger-map)
-// ---------------------------------------------------------------------------
 
 // JenkinsTriggerMapping is the top-level structure of jenkins_trigger_mapping.json.
 type JenkinsTriggerMapping struct {
@@ -440,9 +434,7 @@ type QaseProjectInfo struct {
 	AutomationTags []string `json:"automation_tags"`
 }
 
-// ---------------------------------------------------------------------------
 // Environment Plan types (output of plan-environment)
-// ---------------------------------------------------------------------------
 
 // EnvironmentPlan is the top-level output of the "plan-environment" step. It
 // describes the minimum viable test environment(s) required to run the

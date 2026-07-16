@@ -93,7 +93,6 @@ var defectsCmd = &cobra.Command{
 		allDefects = append(allDefects, triageResults.TestDefects...)
 
 		for _, defect := range allDefects {
-			// Determine target repo
 			targetRepo := defectsProductRepo
 			if defect.Classification == types.ClassTestDefect {
 				targetRepo = defectsTestsRepo
@@ -109,7 +108,6 @@ var defectsCmd = &cobra.Command{
 				continue
 			}
 
-			// Create GitHub issue
 			if defectsAutoCreateIssue && !dryRun {
 				title := fmt.Sprintf("[Agentic QA] %s: %s", defect.Classification, defect.TestName)
 				body := buildIssueBody(defect, defectsPRNumber)
@@ -150,7 +148,6 @@ var defectsCmd = &cobra.Command{
 					}
 				}
 
-				// Create Qase defect
 				severity := string(defect.RecommendedSeverity)
 				if severity == "" {
 					severity = defectNormalSeverity // Qase API default severity

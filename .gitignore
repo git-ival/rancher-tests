@@ -4,7 +4,6 @@
 .kube/
 *.pem
 
-# Agentic QA pipeline — sensitive config files supplied as Jenkins parameters
-# at runtime, never committed to the repository.
+# Runtime Agentic QA config; may contain sensitive infrastructure data.
 *_mapping.json
 *_env.json

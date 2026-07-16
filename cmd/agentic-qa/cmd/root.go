@@ -25,14 +25,11 @@ var (
 	dryRun          bool
 	localTest       bool
 
-	// pipelineEnv is loaded once during PersistentPreRunE and shared across all
-	// subcommands.  It is nil when --pipeline-env is not provided, in which case
-	// callers must use envconfig.Generate() as a fallback.
+	// pipelineEnv is loaded once; nil means callers use generated defaults.
 	pipelineEnv *envconfig.PipelineEnv
 )
 
 const (
-	// Command names.
 	genFeatureMapCommandName   = "generate-feature-map"
 	genTriggerMapCommandName   = "generate-trigger-map"
 	genPipelineEnvCommandName  = "generate-pipeline-env"
@@ -47,7 +44,6 @@ const (
 	validateCommandName        = "validate"
 	completionCommandName      = "completion"
 
-	// Root persistent flag names.
 	providerFlag       = "provider"
 	vertexProjectFlag  = "vertex-project"
 	vertexLocationFlag = "vertex-location"
@@ -60,7 +56,6 @@ const (
 	dryRunFlag         = "dry-run"
 	localTestFlag      = "local-test"
 
-	// Flag names shared across multiple subcommands.
 	outputFileFlag        = "output-file"
 	prNumberFlag          = "pr-number"
 	repoFlag              = "repo"
@@ -73,7 +68,6 @@ const (
 	qaseProjectsFlag      = "qase-projects"
 	additionalContextFlag = "additional-context-file"
 
-	// Environment variable names.
 	googleApplicationCredentialsEnvVar = "GOOGLE_APPLICATION_CREDENTIALS"
 	claudeAPIKeyEnvVar                 = "CLAUDE_API_KEY"
 	qaseApiTokenEnvVar                 = "QASE_API_TOKEN"
@@ -82,25 +76,19 @@ const (
 	jenkinsUserEnvVar                  = "JENKINS_USER"
 	jenkinsTokenEnvVar                 = "JENKINS_TOKEN"
 
-	// LLM provider names — mirrors llm.ProviderVertexAI / llm.ProviderClaudeDirect.
-	// Defined here as local consts so switch statements in this package don't need
-	// to import the llm package just for a string comparison.
+	// Local names avoid importing llm solely for comparisons.
 	llmProviderVertexAI     = llm.ProviderVertexAI
 	llmProviderClaudeDirect = llm.ProviderClaudeDirect
 
-	// Default model IDs.
 	defaultSonnetModel = "claude-sonnet-4-6-20250514"
 	defaultHaikuModel  = "claude-haiku-3-5-20241022"
 
-	// Mapping file version written by both generate-* commands.
 	mappingFileVersion = "2.0"
 
-	// Default repository slugs — used only as CLI flag defaults.
-	// The actual runtime values come from PipelineEnv.ProductRepo / TestsRepo.
+	// CLI defaults; PipelineEnv supplies runtime values.
 	defaultProductRepo = "rancher/rancher"
 	defaultTestsRepo   = "rancher/tests"
 
-	// Job/build status values used in trigger and wait.
 	jobStatusSuccess       = "SUCCESS"
 	jobStatusFailure       = "FAILURE"
 	jobStatusUnstable      = "UNSTABLE"
@@ -111,7 +99,6 @@ const (
 	jobStatusLocalTest     = "local_test"
 	jobStatusQueued        = "queued"
 
-	// Jenkins job parameter names.
 	jenkinsParamTimeout   = "TIMEOUT"
 	jenkinsParamPRNumber  = "PR_NUMBER"
 	jenkinsParamQaseRunID = "QASE_RUN_ID"
@@ -121,9 +108,7 @@ const (
 const localTestPrefix = "[LOCAL-TEST] "
 
 const (
-	// LLM max-token budgets. Higher budgets are used for tasks that produce
-	// more text (guard code, test identification); lower budgets for structured
-	// JSON decisions that are always short.
+	// Token budgets by expected response size.
 	llmMaxTokensIdentify   = 4096
 	llmMaxTokensGuard      = 4096
 	llmMaxTokensTriage     = 2048
@@ -163,9 +148,7 @@ var rootCmd = &cobra.Command{
   11. cleanup   - Clean up pipeline-created resources
   12. validate  - Validate credential connectivity`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// Load pipeline_env.json if provided.  generate-pipeline-env and the
-		// other generate-* commands may run without it (they either produce the
-		// file or only need the Qase API token, not the full env config).
+		// Generator commands may run without pipeline_env.json.
 		if pipelineEnvFile != "" {
 			env, err := envconfig.Load(pipelineEnvFile)
 			if err != nil {
@@ -175,13 +158,11 @@ var rootCmd = &cobra.Command{
 			logrus.Infof("Loaded pipeline environment config from %s", pipelineEnvFile)
 		}
 
-		// Skip LLM credential validation for commands that don't need it.
 		switch cmd.Name() {
 		case genFeatureMapCommandName, genTriggerMapCommandName, genPipelineEnvCommandName, validateCommandName, completionCommandName, "help":
 			return nil
 		case planEnvironmentCommandName:
-			// plan-environment only needs LLM credentials when its LLM fallback
-			// is enabled (i.e. --static-only is NOT set).
+			// Static-only planning does not need LLM credentials.
 			if planEnvStaticOnly {
 				return nil
 			}
@@ -234,10 +215,7 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
-// activePipelineEnv returns the loaded PipelineEnv if --pipeline-env was
-// supplied, otherwise falls back to the generated defaults.  Callers should
-// always use this rather than accessing pipelineEnv directly so that the
-// pipeline works without a pipeline_env.json during development/testing.
+// activePipelineEnv returns loaded config or generated defaults.
 func activePipelineEnv() *envconfig.PipelineEnv {
 	if pipelineEnv != nil {
 		return pipelineEnv

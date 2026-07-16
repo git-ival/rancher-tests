@@ -1,13 +1,4 @@
-// Package envconfig loads and validates the pipeline_env.json configuration
-// file that externalises organisation- and environment-specific values from
-// the agentic-qa binary.
-//
-// pipeline_env.json is intentionally excluded from VCS (see .gitignore) and
-// is supplied at runtime — typically via a Jenkins text parameter, the same
-// pattern used for jenkins_trigger_mapping.json.
-//
-// Use Generate() to produce a pre-populated template the operator can save
-// and customise, then Load() to read it back at runtime.
+// Package envconfig manages Agentic QA runtime configuration.
 package envconfig
 
 import (
@@ -26,30 +17,18 @@ const (
 	defaultAWSCICDInstanceTag = "platform-qa"
 )
 
-// PipelineEnv holds all organisation- and environment-specific configuration
-// that was previously compiled into the agentic-qa binary as constants.
+// PipelineEnv contains environment-specific configuration.
 type PipelineEnv struct {
-	// ---- Qase configuration ------------------------------------------------
-
-	// QaseATNFieldID is the numeric ID of the Qase custom field that stores
-	// the AutomationTestName (Go test function name).  In the Rancher workspace
-	// this is field 15.
+	// QaseATNFieldID identifies the AutomationTestName field.
 	QaseATNFieldID int `json:"qase_atn_field_id"`
 
-	// QaseProjects is the ordered list of Qase project codes to query when
-	// resolving test case IDs or performing title-based fallback matching.
+	// QaseProjects lists projects in query order.
 	QaseProjects []string `json:"qase_projects"`
 
-	// QaseProjectNames maps each project code to a human-readable display name
-	// used in log messages and generated mapping metadata.
+	// QaseProjectNames maps project codes to display names.
 	QaseProjectNames map[string]string `json:"qase_project_names"`
 
-	// ---- Jenkins / build-tag configuration ---------------------------------
-
-	// TagToJob maps a build tag (e.g. "pit.daily") to the canonical Jenkins
-	// job name that runs tests carrying that tag.  This is the same data that
-	// appears in jenkins_trigger_mapping.json's "tag_to_job" section; keeping
-	// both in sync is the operator's responsibility.
+	// TagToJob maps build tags to canonical Jenkins jobs.
 	TagToJob map[string]string `json:"tag_to_job"`
 
 	// TagToQaseProject maps a build tag prefix or full tag to the Qase project
@@ -58,79 +37,48 @@ type PipelineEnv struct {
 	// tries the full tag first, then the longest matching prefix.
 	TagToQaseProject map[string]string `json:"tag_to_qase_project"`
 
-	// JobNamePatternToQaseProject maps a substring of a Jenkins job name to a
-	// Qase project code.  Used by generate-trigger-map when tag-based lookup
-	// produces no match.  Keys are matched with strings.Contains (case-insensitive).
+	// JobNamePatternToQaseProject maps case-insensitive job substrings to projects.
 	JobNamePatternToQaseProject map[string]string `json:"job_name_pattern_to_qase_project"`
 
-	// JobNameTagPatterns is an ordered list of rules used by generate-trigger-map
-	// to infer applicable build tags from a Jenkins job name when the TAGS
-	// parameter is not set.  Rules are evaluated in order; the first matching
-	// pattern in each rule wins (use exclusive=true to skip remaining patterns
-	// in the same rule group).  Pattern matching is case-insensitive.
+	// JobNameTagPatterns contains ordered, case-insensitive tag inference rules.
 	JobNameTagPatterns []JobNameTagPattern `json:"job_name_tag_patterns"`
 
 	// DefaultQaseProject is the Qase project code to assign when no tag or
 	// job-name pattern produces a match.
 	DefaultQaseProject string `json:"default_qase_project"`
 
-	// ---- Repository configuration ------------------------------------------
-
-	// ProductRepo is the "owner/repo" slug for the primary product repository
-	// (used when filing product-defect GitHub issues).
+	// ProductRepo receives product-defect issues.
 	ProductRepo string `json:"product_repo"`
 
-	// TestsRepo is the "owner/repo" slug for the test repository (used when
-	// filing test-defect GitHub issues and config-failure PRs).
+	// TestsRepo receives test issues and config-failure PRs.
 	TestsRepo string `json:"tests_repo"`
 
-	// ---- GitHub configuration ----------------------------------------------
-
-	// CopilotUsername is the GitHub username of the Copilot / coding-agent bot
-	// that is assigned to auto-created defect issues.
+	// CopilotUsername receives generated defect issues.
 	CopilotUsername string `json:"copilot_username"`
 
-	// AgenticQALabel is the GitHub issue label applied to every issue and PR
-	// created by the pipeline.
+	// AgenticQALabel marks generated issues and PRs.
 	AgenticQALabel string `json:"agentic_qa_label"`
 
-	// ---- LLM prompt configuration ------------------------------------------
-
-	// ProjectDisplayName is a short human-readable name for the project being
-	// tested, injected into LLM system prompts so the model has product context
-	// (e.g. "Rancher Kubernetes management platform").
+	// ProjectDisplayName supplies product context to prompts.
 	ProjectDisplayName string `json:"project_display_name"`
 
-	// ---- Cattle-config generation -----------------------------------------
-
-	// CattleConfig holds the organisation-specific values used by
-	// plan-environment to render a fully-functional cattle-config.yaml. Values
-	// are emitted verbatim, so they are typically ${VAR} placeholders that an
-	// envsubst step expands at pipeline runtime (shepherd does NOT expand env
-	// vars itself). Operators may instead put literal values here.
+	// CattleConfig configures generated cattle-config.yaml values.
+	// Placeholders need envsubst; shepherd does not expand them.
 	CattleConfig CattleConfigTemplate `json:"cattle_config"`
-
-	// ---- Sizing policy -----------------------------------------------------
 
 	// SizingPolicy defines the node-count/HA/cost profiles applied by
 	// plan-environment to upstream and downstream cluster topologies.
 	SizingPolicy SizingPolicyConfig `json:"sizing_policy"`
 
-	// ---- Upstream (Rancher management) cluster -----------------------------
-
 	// Upstream holds the settings used to render the upstream Rancher
 	// management cluster recommendation into qa-infra-automation input files.
 	Upstream UpstreamConfig `json:"upstream"`
-
-	// ---- Chart resource footprints -----------------------------------------
 
 	// ChartSizing configures how plan-environment resolves the resource
 	// footprint of Helm charts the tests install (used to size downstream
 	// clusters). It carries the live chart source and a curated fallback
 	// catalog.
 	ChartSizing ChartSizingConfig `json:"chart_sizing"`
-
-	// ---- Version resolution -------------------------------------------------
 
 	// VersionResolution configures plan-environment's --resolve-versions
 	// flag: where to look up Rancher/Kubernetes/cert-manager versions and

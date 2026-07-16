@@ -42,28 +42,19 @@ func (c mergeConflict) String() string {
 	return fmt.Sprintf("%s mismatch: %q vs %q", c.field, c.a, c.b)
 }
 
-// MergeClusters merges a set of cluster requirements into one minimum viable
-// cluster (taking the superset / maximum of every dimension). It returns the
-// merged cluster, any warnings (resolved soft conflicts), and any hard
-// conflicts that make a single environment unsafe.
-//
-// Hard conflicts are: differing non-empty Provider, KubernetesDistro, CNI,
-// PSACT, or mixed Hardened settings. Node pools are merged by role signature,
-// taking the maximum quantity per role set. Networking flags are OR-ed.
+// MergeClusters combines compatible requirements and reports conflicts.
 func MergeClusters(reqs []types.ClusterRequirement) (merged types.ClusterRequirement, warnings []string, conflicts []mergeConflict) {
 	poolByRole := map[string]types.NodeRequirement{}
 	var roleOrder []string
 
 	for _, r := range reqs {
-		// Scalar string dimensions: detect hard conflicts, otherwise adopt.
 		merged.KubernetesDistro, conflicts = mergeScalar("kubernetes_distro", merged.KubernetesDistro, r.KubernetesDistro, conflicts)
 		merged.Provider, conflicts = mergeScalar("provider", merged.Provider, r.Provider, conflicts)
 		merged.NodeProvider, conflicts = mergeScalar("node_provider", merged.NodeProvider, r.NodeProvider, conflicts)
 		merged.CNI, conflicts = mergeScalar("cni", merged.CNI, r.CNI, conflicts)
 		merged.PSACT, conflicts = mergeScalar("psact", merged.PSACT, r.PSACT, conflicts)
 
-		// Kubernetes version: take the highest non-empty (lexical max is a
-		// reasonable proxy; soft conflict only).
+		// Kubernetes version mismatch is soft; use the lexical maximum.
 		if r.KubernetesVersion != "" {
 			if merged.KubernetesVersion == "" {
 				merged.KubernetesVersion = r.KubernetesVersion
@@ -75,24 +66,16 @@ func MergeClusters(reqs []types.ClusterRequirement) (merged types.ClusterRequire
 			}
 		}
 
-		// Hardened: any hardened requirement makes the merged cluster hardened,
-		// but mixing hardened and non-hardened is a hard conflict because a
-		// hardened cluster can break non-hardened tests.
 		if r.Hardened {
 			merged.Hardened = true
 		}
 
-		// Downstream: any downstream requirement implies downstream.
 		if r.Downstream {
 			merged.Downstream = true
 		}
 
-		// Networking: OR the boolean flags, adopt first non-empty strings.
 		merged.Networking = mergeNetworking(merged.Networking, r.Networking)
 
-		// Node pools: key by role signature, keep max quantity AND the
-		// element-wise max recommended spec so the merged pool can satisfy the
-		// most demanding test sharing that role signature.
 		for _, p := range r.NodePools {
 			key := roleSignature(p)
 			if existing, ok := poolByRole[key]; ok {
@@ -108,8 +91,7 @@ func MergeClusters(reqs []types.ClusterRequirement) (merged types.ClusterRequire
 		}
 	}
 
-	// Hardened-vs-not is a hard conflict only when at least one req is hardened
-	// and at least one is explicitly not hardened with downstream nodes.
+	// Mixed hardened and explicit non-hardened downstream requirements conflict.
 	if merged.Hardened {
 		for _, r := range reqs {
 			if !r.Hardened && r.Downstream {
@@ -119,7 +101,6 @@ func MergeClusters(reqs []types.ClusterRequirement) (merged types.ClusterRequire
 		}
 	}
 
-	// Emit merged node pools in a stable order (role signature sort).
 	sort.Strings(roleOrder)
 	for _, key := range roleOrder {
 		merged.NodePools = append(merged.NodePools, poolByRole[key])
@@ -231,18 +212,10 @@ func mergeCharts(sets ...[]types.ChartRequirement) []types.ChartRequirement {
 	return out
 }
 
-// BuildPlan turns per-file requirements into an EnvironmentPlan. It first
-// attempts the single-environment strategy (merging everything). If merging
-// produces hard conflicts, it falls back to per-group environments keyed by
-// Jenkins job (or build tag when no job is known).
-//
-// groupKeyFor returns the grouping key for a requirement under the per-group
-// strategy; pass nil to use the default (first Jenkins job, else first build
-// tag, else "ungrouped").
+// BuildPlan uses one environment when safe, otherwise groups by job or tag.
 func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 	plan := types.EnvironmentPlan{PRNumber: prNumber}
 
-	// Attempt single environment.
 	clusters := make([]types.ClusterRequirement, 0, len(reqs))
 	for _, r := range reqs {
 		clusters = append(clusters, r.Cluster)
@@ -282,7 +255,6 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 		return plan
 	}
 
-	// Fall back to per-group.
 	plan.Strategy = types.PlanStrategyPerGroup
 	var conflictMsgs []string
 	for _, c := range conflicts {
@@ -300,10 +272,7 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 	}
 	sort.Strings(order)
 
-	// Within each job-group, residual conflicts (e.g. RKE2 vs K3S tests that
-	// happen to share the same Jenkins job) are resolved by sub-splitting on a
-	// conflict-aware key so that every emitted environment is internally
-	// consistent. The emitted group name is suffixed with the discriminator.
+	// Split inconsistent job groups by conflicting dimensions.
 	for _, key := range order {
 		members := grouped[key]
 
@@ -329,7 +298,6 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 				DerivedBy: map[string]string{},
 			}
 			members := subMembers
-			// Annotate why we split.
 			g.Warnings = append(g.Warnings, "split into per-group strategy due to: "+strings.Join(conflictMsgs, "; "))
 			if multiSub {
 				g.Warnings = append(g.Warnings, fmt.Sprintf("sub-split job group %q on discriminator %q for internal consistency", key, subKey))
@@ -365,11 +333,7 @@ func BuildPlan(reqs []Requirement, prNumber int) types.EnvironmentPlan {
 	return plan
 }
 
-// subSplitConsistent partitions a job-group's members into internally
-// consistent sub-groups keyed by the dimensions that cause hard merge
-// conflicts (distro, provider, CNI, PSACT, hardened). Members that share the
-// same discriminator can safely merge into one environment. When the whole
-// group is already consistent, it returns a single sub-group keyed "".
+// subSplitConsistent partitions a group by hard-conflict dimensions.
 func subSplitConsistent(members []Requirement) (map[string][]Requirement, []string) {
 	groups := map[string][]Requirement{}
 	var order []string
@@ -381,17 +345,13 @@ func subSplitConsistent(members []Requirement) (map[string][]Requirement, []stri
 		groups[key] = append(groups[key], m)
 	}
 	if len(order) <= 1 {
-		// Single consistent sub-group: collapse to "" so the name isn't suffixed.
 		return map[string][]Requirement{"": members}, []string{""}
 	}
 	sort.Strings(order)
 	return groups, order
 }
 
-// consistencyKey returns a discriminator describing the cluster dimensions
-// that, if they differ, prevent two requirements from sharing one environment.
-// Only non-empty dimensions contribute, so a test that pins nothing is
-// compatible with anything and lands in a shared default bucket.
+// consistencyKey identifies pinned dimensions that prevent sharing.
 func consistencyKey(c types.ClusterRequirement) string {
 	var parts []string
 	if c.KubernetesDistro != "" {

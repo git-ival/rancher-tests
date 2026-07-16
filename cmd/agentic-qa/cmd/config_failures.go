@@ -62,7 +62,6 @@ var configFailuresCmd = &cobra.Command{
 			return saveJSON(cfOutputFile, result)
 		}
 
-		// Create LLM clients
 		haikuClient, err := newLLMClient(ctx, haikuModel)
 		if err != nil {
 			return fmt.Errorf("creating haiku LLM client: %w", err)
@@ -83,7 +82,7 @@ var configFailuresCmd = &cobra.Command{
 		result := types.ConfigActions{}
 
 		for _, issue := range triageResults.ConfigIssues {
-			// Use haiku to decide: rerun or implement guard
+			// Use Haiku to choose rerun or guard generation.
 			decisionPrompt := `You are a test infrastructure expert. Given a configuration/environment test failure,
 decide whether to:
 1. "rerun" - the failure is transient and a rerun should fix it
@@ -200,7 +199,7 @@ Respond with JSON:
 	},
 }
 
-// splitConfigJobName determines the Jenkins folder and job name for a given test, using the trigger mapping if available.
+// splitConfigJobName resolves a test's Jenkins folder and job.
 func splitConfigJobName(testName string, mapping map[string]any) (folder, jobName string) {
 	if mapping != nil {
 		if jobConfig, ok := mapping[testName].(map[string]any); ok {

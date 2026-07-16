@@ -51,7 +51,6 @@ var analyzeCmd = &cobra.Command{
 			return fmt.Errorf("loading completed jobs: %w", err)
 		}
 
-		// Load optional triage framework
 		var frameworkData string
 		if analyzeTriageFramework != "" {
 			data, err := os.ReadFile(analyzeTriageFramework)
@@ -72,7 +71,6 @@ var analyzeCmd = &cobra.Command{
 			}
 		}
 
-		// Build all pattern rules
 		allPatterns := make([]triage.PatternRule, 0,
 			len(triage.EnvPatterns)+len(triage.TestDefectPatterns)+len(triage.ProductDefectPatterns))
 		allPatterns = append(allPatterns, triage.EnvPatterns...)
@@ -84,7 +82,6 @@ var analyzeCmd = &cobra.Command{
 			TotalTests: len(completedJobs.Completed) + len(completedJobs.Failed),
 		}
 
-		// Process passed tests
 		for _, job := range completedJobs.Completed {
 			result.Passed = append(result.Passed, types.TriageEntry{
 				TestName:       job.JobName,
@@ -92,7 +89,6 @@ var analyzeCmd = &cobra.Command{
 			})
 		}
 
-		// Process failed tests
 		var llmNeeded []types.CompletedJob
 		for _, job := range completedJobs.Failed {
 			entry := classifyByPattern(job, allPatterns)
@@ -110,12 +106,10 @@ var analyzeCmd = &cobra.Command{
 			}
 		}
 
-		// Use LLM for unclassified failures
 		if len(llmNeeded) > 0 {
 			llmClient, err := newLLMClient(ctx, sonnetModel)
 			if err != nil {
 				logrus.Errorf("Failed to create LLM client for triage: %v", err)
-				// Add as unclassified
 				for _, job := range llmNeeded {
 					result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
 						TestName:       job.JobName,
@@ -169,11 +163,9 @@ var analyzeCmd = &cobra.Command{
 	},
 }
 
-// classifyByPattern attempts to match a failed job against known patterns.
-// Returns nil if no pattern matches.
+// classifyByPattern returns the matching classification, or nil.
 func classifyByPattern(job types.CompletedJob, patterns []triage.PatternRule) *types.TriageEntry {
-	// We check the job name and log URL for pattern matches.
-	// In a real implementation, we'd fetch and scan the actual log content.
+	// TODO: Fetch logs; only the job name and log URL are matched.
 	searchText := job.JobName + " " + job.Status + " " + job.LogURL
 	for _, p := range patterns {
 		if p.Pattern.MatchString(searchText) {

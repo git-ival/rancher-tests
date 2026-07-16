@@ -40,8 +40,7 @@ func init() {
 	rootCmd.AddCommand(waitCmd)
 }
 
-// completeQaseRun marks a Qase test run as complete, trying MCP first then REST.
-// Logs warnings on failure but does not return an error — completion is best-effort.
+// completeQaseRun best-effort completes a run through MCP, then REST.
 func completeQaseRun(ctx context.Context, project string, runID int) {
 	mcpClient := qase.NewMCPClient(mcpURL)
 	if mcpClient.IsConfigured() {
@@ -89,7 +88,6 @@ var waitCmd = &cobra.Command{
 		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 		jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 
-		// Resolve build numbers from queue IDs first
 		for i := range triggered.Jobs {
 			job := &triggered.Jobs[i]
 			if job.QueueID != nil && job.BuildNumber == nil {
@@ -103,7 +101,6 @@ var waitCmd = &cobra.Command{
 			}
 		}
 
-		// Poll until all jobs are terminal
 		var completed []types.CompletedJob
 		var failed []types.CompletedJob
 		pending := make(map[int]*types.TriggeredJob)
@@ -127,7 +124,6 @@ var waitCmd = &cobra.Command{
 			time.Sleep(pollDuration)
 
 			for idx, job := range pending {
-				// Extract folder/job from the job name
 				folder, jobName := splitJobName(job.JobName)
 
 				status, err := jClient.GetBuildStatus(ctx, folder, jobName, *job.BuildNumber)
@@ -158,8 +154,7 @@ var waitCmd = &cobra.Command{
 			}
 		}
 
-		// Complete all Qase runs tracked in this triggered jobs file.
-		// Falls back to the legacy single-run fields for backward compat.
+		// Complete all runs, falling back to legacy fields.
 		if !dryRun {
 			runsToComplete := triggered.QaseRuns
 			if len(runsToComplete) == 0 && triggered.QaseRunID != nil {
@@ -173,8 +168,8 @@ var waitCmd = &cobra.Command{
 		}
 
 		result := types.CompletedJobs{
-			QaseRuns:             triggered.QaseRuns,  // propagate for downstream consumers
-			QaseRunID:            triggered.QaseRunID, // backward compat
+			QaseRuns:             triggered.QaseRuns,
+			QaseRunID:            triggered.QaseRunID,
 			Completed:            completed,
 			Failed:               failed,
 			TotalDurationMinutes: time.Since(startTime).Minutes(),

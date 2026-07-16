@@ -48,10 +48,7 @@ type TestResult struct {
 	Hash    string `json:"hash"`
 }
 
-// AutomationTestNameFieldID is the default Qase custom field ID that stores
-// the Go test function name.  This value is workspace-specific; override it
-// via Client.WithATNFieldID or by using NewClientWithConfig.
-// Matches actions/qase/defaults.go AutomationTestNameID = 15.
+// AutomationTestNameFieldID is the workspace's default Qase field ID.
 const AutomationTestNameFieldID = 15
 
 // customFieldValue is the raw shape returned by the Qase v1 cases list endpoint.
@@ -94,8 +91,7 @@ func NewClient(token string) *Client {
 	return NewClientWithATNFieldID(token, AutomationTestNameFieldID)
 }
 
-// NewClientWithATNFieldID creates a new Qase API client with a custom ATN
-// field ID (for workspaces where the field ID differs from the default 15).
+// NewClientWithATNFieldID creates a client with a custom automation-name field.
 func NewClientWithATNFieldID(token string, atnFieldID int) *Client {
 	return &Client{
 		baseURL: BaseURL,
@@ -125,8 +121,7 @@ type idResult struct {
 	ID int `json:"id"`
 }
 
-// doRequest executes an HTTP request with retry on 429 (rate-limit).
-// SECURITY: response bodies are never logged.
+// doRequest retries rate limits and never logs response bodies.
 func (c *Client) doRequest(ctx context.Context, method, path string, body any) (json.RawMessage, error) {
 	var resultBody json.RawMessage
 
@@ -175,7 +170,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 			}
 
 			if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-				// Include truncated response body for diagnostics on client errors.
 				errBody := string(respData)
 				if len(errBody) > maxErrBodyLen {
 					errBody = errBody[:maxErrBodyLen] + "..."
@@ -188,7 +182,6 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body any) (
 				return retry.Unrecoverable(fmt.Errorf("API error: HTTP %d: %s", resp.StatusCode, errBody))
 			}
 
-			// For 204 No Content (e.g. DELETE), there is no body to parse.
 			if resp.StatusCode == http.StatusNoContent || len(respData) == 0 {
 				return nil
 			}
@@ -233,11 +226,8 @@ func (c *Client) CreateTestRun(ctx context.Context, project, title, description 
 	return id.ID, nil
 }
 
-// CreateTestRunWithCases creates a new test run and assigns the provided case IDs.
-// If the API rejects the request due to too many case-configuration combinations
-// (common in projects with configuration groups like RM), it falls back to creating
-// the run without pre-populating cases. The Jenkins Qase reporter will still post
-// results referencing case IDs directly against the run.
+// CreateTestRunWithCases creates a run with case IDs. If Qase exceeds its
+// configuration limit, it creates an empty run for reporter-posted results.
 func (c *Client) CreateTestRunWithCases(ctx context.Context, project, title, description string, caseIDs []int) (int, error) {
 	if len(caseIDs) == 0 {
 		return 0, fmt.Errorf("creating test run with cases: caseIDs cannot be empty")
@@ -251,9 +241,6 @@ func (c *Client) CreateTestRunWithCases(ctx context.Context, project, title, des
 
 	result, err := c.doRequest(ctx, http.MethodPost, fmt.Sprintf("/run/%s", url.PathEscape(project)), payload)
 	if err != nil {
-		// If the error is due to too many combinations (project has configurations
-		// that multiply case count beyond the 1024 limit), fall back to creating
-		// the run without pre-populated cases.
 		if strings.Contains(err.Error(), "HTTP 400") {
 			logrus.Warnf("Qase project %s rejected run with %d cases (likely configuration combinations exceed limit); creating run without pre-populated cases", project, len(caseIDs))
 			return c.CreateTestRun(ctx, project, title, description)

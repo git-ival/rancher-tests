@@ -40,21 +40,11 @@ func init() {
 	rootCmd.AddCommand(identifyCmd)
 }
 
-// consolidateQaseProjects assigns each test to exactly one Qase project using
-// a frequency-greedy algorithm: the project that appears most often across the
-// identified test set wins. On frequency ties, lexicographic order is the
-// tiebreaker.
-//
-// Only projects that actually appear in at least one test's QaseCasesByProject
-// (or QaseProjects as fallback) are considered. Tests with no project
-// association are excluded from consolidation.
-//
-// When no --qase-project flag is set on trigger, ALL resulting projects will
-// each get a Qase run with their assigned tests triggered.
+// consolidateQaseProjects assigns each test to its most frequent project.
+// Lexicographic order breaks ties.
 func consolidateQaseProjects(
 	tests []types.TestEntry,
 ) (projects []string, byProject map[string][]int) {
-	// 1. Frequency pass: count how many tests list each project.
 	freq := map[string]int{}
 	for _, t := range tests {
 		if len(t.QaseCasesByProject) > 0 {
@@ -68,7 +58,6 @@ func consolidateQaseProjects(
 		}
 	}
 
-	// 2. Build dynamic priority: sorted by frequency descending, then lexicographic.
 	var sortedProjects []string
 	for p := range freq {
 		sortedProjects = append(sortedProjects, p)
@@ -85,7 +74,6 @@ func consolidateQaseProjects(
 		priority[p] = idx
 	}
 
-	// 3. Assignment pass: pick the best (highest-frequency) project for each test.
 	byProject = map[string][]int{}
 	for i, t := range tests {
 		var candidates []string
@@ -111,7 +99,6 @@ func consolidateQaseProjects(
 		byProject[best] = append(byProject[best], i)
 	}
 
-	// 4. Collect sorted project list.
 	for p := range byProject {
 		projects = append(projects, p)
 	}
@@ -157,7 +144,6 @@ If an identified test has no mapped qase_cases, identify fails with an error.`,
 			return fmt.Errorf("getting PR files: %w", err)
 		}
 
-		// Load and parse the pre-generated feature test mapping.
 		mappingData, err := os.ReadFile(identifyMappingFile)
 		if err != nil {
 			return fmt.Errorf("reading mapping file: %w", err)
@@ -202,7 +188,6 @@ If an identified test has no mapped qase_cases, identify fails with an error.`,
 		result.MergeCommitSHA = prInfo.MergeCommitSHA
 		result.BaseRef = prInfo.Base
 
-		// Enrich identified tests using only qase_cases from the pre-generated mapping.
 		if err := enrichQaseCasesFromMapping(&result, &mapping); err != nil {
 			return fmt.Errorf("enriching Qase cases from mapping: %w", err)
 		}
@@ -266,14 +251,8 @@ func truncate(s string, maxLen int) string {
 	return s[:maxLen] + "\n... (truncated)"
 }
 
-// enrichQaseCasesFromMapping enriches identified tests using only qase_cases
-// from the pre-generated feature_test_mapping.json. No live Qase API fallback
-// or validation is performed here.
-//
-// This is intentionally strict: every identified test must have mapped case
-// IDs, otherwise identify returns an error so trigger can remain mapping-only.
+// enrichQaseCasesFromMapping adds mapped cases and rejects unmapped tests.
 func enrichQaseCasesFromMapping(result *types.IdentifiedTests, mapping *types.FeatureTestMapping) error {
-	// Build an index: file path → TestFile from the mapping.
 	fileIndex := buildFileIndex(mapping)
 
 	missing := 0
@@ -293,7 +272,6 @@ func enrichQaseCasesFromMapping(result *types.IdentifiedTests, mapping *types.Fe
 			continue
 		}
 
-		// Enrich the TestEntry with projects and case IDs from the mapping only.
 		t.QaseProjects = append([]string(nil), tf.QaseProjects...)
 		sort.Strings(t.QaseProjects)
 		t.QaseCaseIDs = nil

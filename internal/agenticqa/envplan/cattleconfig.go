@@ -17,7 +17,6 @@ const (
 	// expect MiB rather than GiB.
 	giBToMiB = 1024
 
-	// cattle-config YAML key names used in output-generation logic.
 	yamlKeyMachinePoolConfig = "machinePoolConfig"
 	yamlKeyQuantity          = "quantity"
 	yamlKeyEC2ConfigList     = "awsEC2Config"
@@ -32,46 +31,23 @@ const (
 	yamlKeyAWSEC2Configs = "awsEC2Configs"
 )
 
-// Field-rendering classification. Most cattle-config values are strings (and
-// ${VAR} placeholders are fine as quoted strings — envsubst replaces the inner
-// text). A few fields are YAML sequences or integers and must be rendered
-// accordingly so the post-envsubst document is schema-valid.
+// Lists and integers need explicit YAML kinds after envsubst.
 var (
-	// listFields are rendered as YAML sequences. A placeholder value such as
-	// "${AWS_SECURITY_GROUP_NAMES}" becomes a single-element list; expand to a
-	// comma-or-space-separated env value at runtime if multiple are needed.
+	// Placeholder lists render as one element.
 	listFields = map[string]bool{
 		yamlKeySecurityGroup:     true,
 		yamlKeyAWSSecurityGroups: true,
 		yamlKeyRoles:             true,
 	}
-	// rawScalarFields are emitted as unquoted scalars so that an integer-typed
-	// destination field (e.g. awsEC2Configs.volumeSize int) parses correctly
-	// after envsubst. Quoting would make it a string and fail unmarshalling.
+	// Integer fields must remain unquoted.
 	rawScalarFields = map[string]bool{
 		yamlKeyVolumeSize: true,
 		yamlKeyPort:       true,
 	}
 )
 
-// GenerateCattleConfig renders a complete, ready-to-envsubst cattle-config.yaml
-// for one environment group. It combines:
-//   - the test-derived sections (provisioningInput / clusterConfig) computed by
-//     plan-environment, and
-//   - the organisation's non-test sections (rancher, cloud credentials,
-//     provider machine configs, awsEC2Configs, registryInput, sshPath) taken
-//     verbatim from the CattleConfigTemplate.
-//
-// Sensitive values are ${VAR} placeholders supplied by the template; shepherd
-// does NOT expand env vars, so the pipeline must run `envsubst` (or equivalent)
-// on this file before pointing CATTLE_TEST_CONFIG at it.
-//
-// The provider is taken from the group's derived cluster requirement, falling
-// back to the template's DefaultProvider. Only that provider's credential and
-// machine-config blocks are emitted.
-// preferredFamilies is the ordered instance-family preference from the active
-// sizing profile (e.g. ["t3a","t3"]); it steers AWS instance-type selection
-// toward cheaper families. Pass nil for no preference (cheapest-overall).
+// GenerateCattleConfig renders one group's cattle-config template.
+// Run envsubst before shepherd. preferredFamilies controls AWS selection.
 func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigTemplate, preferredFamilies []string) ([]byte, error) {
 	cluster := g.Cluster
 	root := yamlMap()
@@ -85,49 +61,37 @@ func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigT
 		nodeProvider = tmpl.DefaultNodeProviderByProvider[provider]
 	}
 
-	// Resolve the effective Kubernetes version: an explicit pin from the test,
-	// otherwise the distro's env-var placeholder so envsubst fills it in.
+	// Prefer a pinned Kubernetes version.
 	k8sVersion := cluster.KubernetesVersion
 	if k8sVersion == "" {
 		k8sVersion = tmpl.KubernetesVersionEnvByDistro[cluster.KubernetesDistro]
 	}
 
-	// --- rancher ---
 	if len(tmpl.Rancher) > 0 {
 		addChild(root, "rancher", stringMapNode(tmpl.Rancher))
 	}
 
-	// --- registryInput ---
 	if len(tmpl.RegistryInput) > 0 {
 		addChild(root, "registryInput", stringMapNode(tmpl.RegistryInput))
 	}
 
-	// --- cloud credentials (provider-specific) ---
 	if creds, ok := tmpl.Credentials[provider]; ok && len(creds) > 0 {
 		if key := envconfig.CredentialKeyForProvider(provider); key != "" {
 			addChild(root, key, stringMapNode(creds))
 		}
 	}
 
-	// --- provisioningInput ---
 	provIn := buildProvisioningInput(cluster, provider, nodeProvider, k8sVersion)
 	if provIn != nil && len(provIn.Content) > 0 {
 		addChild(root, "provisioningInput", provIn)
 	}
 
-	// --- clusterConfig ---
 	clusterCfg := buildClusterConfig(cluster, provider, nodeProvider, k8sVersion, tmpl)
 	if clusterCfg != nil && len(clusterCfg.Content) > 0 {
 		addChild(root, "clusterConfig", clusterCfg)
 	}
 
-	// --- provider machine config (e.g. awsMachineConfigs) ---
-	// One machine-config entry is emitted per node pool, each carrying that
-	// pool's specific roles and recommended instance type. This lets the
-	// Rancher provisioner match the right machine config to each pool via
-	// MatchNodeRolesToMachinePool, and prevents a single oversized instance
-	// type from being applied to all roles (e.g. etcd nodes don't need the
-	// same sizing as worker nodes).
+	// Emit role-specific machine configuration per pool.
 	if mc, ok := tmpl.MachineConfigs[provider]; ok {
 		key := envconfig.MachineConfigsKeyForProvider(provider)
 		listKey := envconfig.MachineListKeyForProvider(provider)
@@ -136,10 +100,7 @@ func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigT
 		}
 	}
 
-	// --- awsEC2Configs (custom/ec2 provisioning), aws only ---
-	// awsEC2Configs is a provisioner-level block (not per-pool), so we use the
-	// spec from the most resource-demanding pool (workers/all-roles) rather
-	// than the element-wise max across all pools.
+	// Use the workload pool for provisioner-level EC2 sizing.
 	if tmpl.EC2Config != nil && provider == types.ProviderAWS {
 		workerSpec := workerPoolSpec(cluster.NodePools)
 		overrides := ec2SpecOverrides(workerSpec)
@@ -147,7 +108,6 @@ func GenerateCattleConfig(g types.EnvironmentGroup, tmpl envconfig.CattleConfigT
 		addChild(root, "awsEC2Configs", ec2ConfigNode(*tmpl.EC2Config, allRoles, overrides))
 	}
 
-	// --- sshPath ---
 	if tmpl.SSHPath != "" {
 		ssh := yamlMap()
 		addChild(ssh, "sshPath", scalarNode(tmpl.SSHPath, "sshPath"))
@@ -522,8 +482,6 @@ func fieldNode(field, value string) *yaml.Node {
 	}
 	return scalarNode(value, field)
 }
-
-// ---- yaml.Node helpers ---------------------------------------------------
 
 func yamlMap() *yaml.Node { return &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"} }
 func yamlSeq() *yaml.Node { return &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"} }

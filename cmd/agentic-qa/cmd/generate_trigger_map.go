@@ -55,7 +55,6 @@ func runGenerateTriggerMap() error {
 	}
 	logrus.Infof("Found %d YAML files", len(yamlFiles))
 
-	// Parse all JJB YAML files.
 	allJobs := map[string]*types.JobMapping{}
 	allDefaults := map[string]*jjbDefaults{}
 
@@ -74,29 +73,23 @@ func runGenerateTriggerMap() error {
 		}
 	}
 
-	// Resolve defaults inheritance: fill in missing fields from defaults.
 	for _, job := range allJobs {
 		resolveJobDefaults(job, allDefaults)
 	}
 
-	// Filter to only QA-relevant jobs (ones that have test-related parameters).
 	filteredJobs := filterQAJobs(allJobs)
 	logrus.Infof("Extracted %d QA-relevant jobs (from %d total)", len(filteredJobs), len(allJobs))
 
-	// Build tag→job and hierarchy mappings.
 	tagToJob := buildTagToJob(filteredJobs)
 	tagHierarchy := buildTagHierarchy(tagToJob)
 
-	// Build qase project info.
 	qaseProjects := buildQaseProjectInfo(filteredJobs)
 
-	// Build parameter mapping (which params are Qase-related).
 	qaseParamMapping := map[string]string{
 		"QASE_TEST_RUN_ID":     "Run ID to report results to",
 		"QASE_REPORTER_SCRIPT": "Reporter script that uploads results",
 	}
 
-	// Build Jenkinsfile mapping.
 	jfMapping := buildJenkinsfileMapping(filteredJobs)
 
 	mapping := types.JenkinsTriggerMapping{
@@ -125,13 +118,7 @@ func runGenerateTriggerMap() error {
 	return nil
 }
 
-// ---------------------------------------------------------------------------
-// JJB YAML parsing types
-// ---------------------------------------------------------------------------
-
-// jjbDocument represents one top-level list item in a JJB YAML file.
-// JJB files are lists of items, each with a single key like "job", "defaults",
-// "scm", "view", etc.
+// jjbDocument represents one top-level JJB list item.
 type jjbDocument map[string]interface{}
 
 // jjbDefaults captures the defaults block fields we care about.
@@ -154,7 +141,6 @@ func findJJBYAMLFiles(dir string) ([]string, error) {
 			continue
 		}
 		if strings.HasSuffix(e.Name(), ".yml") || strings.HasSuffix(e.Name(), ".yaml") {
-			// Only include qa-* and harvester-* files that contain job definitions.
 			name := strings.ToLower(e.Name())
 			if strings.HasPrefix(name, "qa-") || strings.HasPrefix(name, "harvester-") ||
 				strings.Contains(name, "recurring") || strings.Contains(name, "freeform") ||
@@ -218,18 +204,14 @@ func parseJobEntry(data interface{}, yamlSource string) (string, *types.JobMappi
 		Parameters:  map[string]types.JobParameter{},
 	}
 
-	// Extract folder from defaults name pattern.
 	if defName := getString(m, "defaults"); defName != "" {
-		// Will be resolved later from defaults.
 		job.Folder = "" // placeholder
 	}
 
-	// Extract folder directly if present.
 	if folder := getString(m, "folder"); folder != "" {
 		job.Folder = folder
 	}
 
-	// Parse parameters.
 	if params, ok := m["parameters"]; ok {
 		if paramList, ok := params.([]interface{}); ok {
 			for _, p := range paramList {
@@ -241,7 +223,6 @@ func parseJobEntry(data interface{}, yamlSource string) (string, *types.JobMappi
 		}
 	}
 
-	// Determine applicable tags: first from TAGS parameter, then infer from job name.
 	if tagsParam, ok := job.Parameters["TAGS"]; ok && tagsParam.Default != "" {
 		job.ApplicableTags = parseTags(tagsParam.Default)
 	}
@@ -249,10 +230,8 @@ func parseJobEntry(data interface{}, yamlSource string) (string, *types.JobMappi
 		job.ApplicableTags = inferTagsFromJobName(name)
 	}
 
-	// Determine Qase project from job name patterns.
 	job.QaseProject = inferQaseProject(name, job.ApplicableTags)
 
-	// Check for QASE_REPORTER_SCRIPT parameter.
 	if reporter, ok := job.Parameters["QASE_REPORTER_SCRIPT"]; ok {
 		job.QaseReporter = reporter.Default
 	}
@@ -277,7 +256,6 @@ func parseDefaultsEntry(data interface{}) (string, *jjbDefaults) {
 		Folder: getString(m, "folder"),
 	}
 
-	// Extract Jenkinsfile from pipeline-scm.
 	if pscm, ok := m["pipeline-scm"]; ok {
 		if pscmMap, ok := pscm.(map[interface{}]interface{}); ok {
 			def.Jenkinsfile = getString(pscmMap, "script-path")
@@ -312,7 +290,6 @@ func parseParameter(p interface{}) (string, types.JobParameter) {
 			Default: fmt.Sprintf("%v", getDefault(dataMap)),
 		}
 
-		// Mark Qase-related parameters.
 		if strings.Contains(strings.ToUpper(name), "QASE") && strings.Contains(strings.ToUpper(name), "RUN") {
 			param.RequiredForQase = true
 		}
@@ -325,11 +302,8 @@ func parseParameter(p interface{}) (string, types.JobParameter) {
 
 // resolveJobDefaults fills in missing fields from the referenced defaults.
 func resolveJobDefaults(job *types.JobMapping, allDefaults map[string]*jjbDefaults) {
-	// Try to find matching defaults by name pattern.
 	for defName, def := range allDefaults {
-		// Check if job's name is built from this default.
 		if job.Folder == "" && def.Folder != "" {
-			// Match by naming convention.
 			if strings.Contains(defName, "individual") && strings.Contains(defName, "updated") {
 				if job.Folder == "" {
 					job.Folder = def.Folder
@@ -352,8 +326,7 @@ func inferTagsFromJobName(name string) []string {
 func filterQAJobs(allJobs map[string]*types.JobMapping) map[string]types.JobMapping {
 	filtered := map[string]types.JobMapping{}
 	for name, job := range allJobs {
-		// Include jobs that have GOTEST_TESTCASE or TEST_PACKAGE params
-		// (indicating they run Go tests), or have applicable_tags set.
+		// Keep jobs that run Go tests or declare applicable tags.
 		_, hasTestCase := job.Parameters["GOTEST_TESTCASE"]
 		_, hasTestPkg := job.Parameters["TEST_PACKAGE"]
 		if hasTestCase || hasTestPkg || len(job.ApplicableTags) > 0 {
@@ -368,7 +341,6 @@ func buildTagToJob(jobs map[string]types.JobMapping) map[string]string {
 	tagToJob := map[string]string{}
 	for name, job := range jobs {
 		for _, tag := range job.ApplicableTags {
-			// Prefer individual jobs over multibranch/orchestrator jobs.
 			existing, ok := tagToJob[tag]
 			if !ok || preferJob(name, existing) {
 				tagToJob[tag] = name
@@ -378,9 +350,8 @@ func buildTagToJob(jobs map[string]types.JobMapping) map[string]string {
 	return tagToJob
 }
 
-// preferJob returns true if candidate should replace existing in tag→job mapping.
+// preferJob favors single-test jobs over orchestrators.
 func preferJob(candidate, existing string) bool {
-	// Prefer "individual" jobs (they run single test cases).
 	candidateIndiv := strings.Contains(candidate, "individual")
 	existingIndiv := strings.Contains(existing, "individual")
 	if candidateIndiv && !existingIndiv {
@@ -389,8 +360,7 @@ func preferJob(candidate, existing string) bool {
 	return false
 }
 
-// buildTagHierarchy groups tags by their hierarchy prefix.
-// e.g. "pit.daily", "pit.weekly" → "pit" → ["pit.daily", "pit.weekly"]
+// buildTagHierarchy groups tags by prefix, such as "pit.daily" under "pit".
 func buildTagHierarchy(tagToJob map[string]string) map[string][]string {
 	hierarchy := map[string][]string{}
 	for tag := range tagToJob {
@@ -400,7 +370,6 @@ func buildTagHierarchy(tagToJob map[string]string) map[string][]string {
 			hierarchy[prefix] = appendUniqueTrigger(hierarchy[prefix], tag)
 		}
 	}
-	// Sort each hierarchy group.
 	for k := range hierarchy {
 		sort.Strings(hierarchy[k])
 	}
@@ -460,7 +429,6 @@ func qaseProjectName(code string) string {
 
 // parseTags splits a comma or space-separated tag string into individual tags.
 func parseTags(s string) []string {
-	// Tags can be comma-separated or just a single tag.
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return nil

@@ -1,11 +1,5 @@
-// Package envversions resolves concrete Rancher/Kubernetes/cert-manager
-// version values for plan-environment's --resolve-versions flag, replacing
-// the default ${VAR} placeholders with real values derived from the identity
-// of the PR under test.
-//
-// Resolution is always best-effort: every tier failure is logged and falls
-// through to the next tier, ultimately falling back to the original
-// ${VAR} placeholder rather than failing the plan.
+// Package envversions best-effort resolves environment versions.
+// Failed resolution retains placeholders.
 package envversions
 
 import (
@@ -37,36 +31,25 @@ const (
 	SourceConfigDefaultMinor = "config-default-minor"
 )
 
-// Env var names used both as the ${VAR} placeholder tokens and as override
-// lookup keys, matching the existing envconfig placeholder convention.
 const (
 	EnvRancherVersion     = "RANCHER_VERSION"
 	EnvRancherImageTag    = "RANCHER_IMAGE_TAG"
 	EnvCertManagerVersion = "CERT_MANAGER_VERSION"
 )
 
-// EnvVarForDistro returns the env-var-style name used for a Kubernetes
-// distro's version (e.g. "rke2" -> "RKE2_VERSION"), matching
-// CattleConfigTemplate.KubernetesVersionEnvByDistro's existing convention.
+// EnvVarForDistro returns the version variable for a distro.
 func EnvVarForDistro(distro string) string {
 	return strings.ToUpper(distro) + "_VERSION"
 }
 
-// chartRepoChannel is one entry in the non-default Helm repo table: versions
-// matching Pattern are published to Name/URL instead of qa-infra-automation's
-// default "rancher-latest" channel.
+// chartRepoChannel maps matching versions to a non-default Helm channel.
 type chartRepoChannel struct {
 	Pattern *regexp.Regexp
 	Name    string
 	URL     string
 }
 
-// chartRepoChannels lists the Rancher prerelease channels that are NOT
-// published to the default "rancher-latest" Helm repo, in the order they
-// should be checked. Verified against releases.rancher.com/server-charts/*
-// index.yaml: alpha builds (e.g. "v2.15.0-alpha19") appear ONLY in the
-// "alpha" channel, never in "latest"; rc and GA versions are already in
-// "latest" so need no override.
+// chartRepoChannels lists prerelease channels absent from rancher-latest.
 var chartRepoChannels = []chartRepoChannel{
 	{
 		Pattern: regexp.MustCompile(`(?i)-alpha`),
@@ -87,9 +70,7 @@ func chartRepoForVersion(version string) (name, url string) {
 	return "", ""
 }
 
-// GitHubClient is the subset of github.Client used for version resolution.
-// Declared here (rather than importing the concrete type into call sites) so
-// tests can inject a fake; *github.Client satisfies it structurally.
+// GitHubClient defines the GitHub operations needed by the resolver.
 type GitHubClient interface {
 	ListTags(ctx context.Context, owner, repo string) ([]string, error)
 	CompareContainsCommit(ctx context.Context, owner, repo, base, head string) (bool, error)
@@ -184,9 +165,7 @@ func NewResolver(gh GitHubClient, httpGetter HTTPGetter, cfg Config) *Resolver {
 	return &Resolver{gh: gh, http: httpGetter, cfg: cfg}
 }
 
-// Resolve runs every tier and returns the full provenance-annotated result.
-// It never returns an error: any tier failure degrades to the next tier and
-// ultimately to a ${VAR} placeholder.
+// Resolve returns provenance-aware values, falling back instead of failing.
 func (r *Resolver) Resolve(ctx context.Context) *types.VersionResolution {
 	minor, minorSource := r.resolveMinor(ctx)
 	logrus.Infof("envversions: resolved Rancher minor %q (%s)", minor, minorSource)
@@ -217,10 +196,7 @@ func (r *Resolver) Resolve(ctx context.Context) *types.VersionResolution {
 	cmVal, cmSource, cmDetail := r.resolveCertManager(ctx, rancherVersion, rancherSource)
 	res.CertManagerVersion = r.withOverride(EnvCertManagerVersion, cmVal, cmSource, cmDetail)
 
-	// Some prerelease channels (currently: alpha) are published to a Helm
-	// repo other than qa-infra-automation's default "rancher-latest". Compute
-	// the override from the FINAL resolved version (post-override) so a
-	// manually-pinned RANCHER_VERSION override is also routed correctly.
+	// Route the final Rancher version to its required Helm channel.
 	res.RancherChartRepoName, res.RancherChartRepoURL = chartRepoForVersion(res.RancherVersion.Value)
 	if res.RancherChartRepoName != "" {
 		logrus.Infof("envversions: rancher version %q is only published to the %q Helm repo (%s); overriding the default rancher-latest channel",
@@ -235,10 +211,7 @@ func (r *Resolver) Resolve(ctx context.Context) *types.VersionResolution {
 // `ARG CHART_DEFAULT_BRANCH=dev-v2.15`.
 var reDockerfileBranchArg = regexp.MustCompile(`(?m)^ARG\s+(?:CATTLE_KDM_BRANCH|CHART_DEFAULT_BRANCH)\s*=\s*\S*?v(\d+\.\d+)`)
 
-// resolveMinor determines the Rancher "major.minor" for this PR. It is the
-// authoritative input for KDM/chart branch selection and the in-development
-// image tag. Precedence: package/Dockerfile build args (the only reliable
-// source for main) -> base-ref parsing -> configured default.
+// resolveMinor prefers Dockerfile metadata, base-ref parsing, then config.
 func (r *Resolver) resolveMinor(ctx context.Context) (minor, source string) {
 	if m := r.fetchDockerfileMinor(ctx); m != "" {
 		return m, SourceDockerfileMinor
@@ -300,12 +273,7 @@ func parseBaseRefMinor(baseRef string) string {
 	return m[1]
 }
 
-// resolveRancherRef finds the newest tag (within the resolved minor line)
-// that contains the PR's merge commit, preferring full releases. When
-// prereleases are disabled it first searches full releases only, then falls
-// back to prereleases if no full release contains the commit. When no tag
-// contains the commit (unmerged PR, or on main/release branch before a tag)
-// it falls back to the in-development version + Rancher CI image tag.
+// resolveRancherRef selects the newest containing release or a dev fallback.
 func (r *Resolver) resolveRancherRef(ctx context.Context, minor string) (versionValue, imageTagValue, source, detail string) {
 	if r.cfg.MergeCommitSHA == "" {
 		return r.devFallback(ctx, minor, "PR has no merge commit yet")
@@ -319,15 +287,12 @@ func (r *Resolver) resolveRancherRef(ctx context.Context, minor string) (version
 
 	releases, prereleases := partitionCandidateTags(tags, minor)
 
-	// Pass 1: full releases only, newest first.
 	if tag, ok := r.newestContainingTag(ctx, releases); ok {
 		return tag, tag, SourceTagCompare,
 			fmt.Sprintf("newest full release for minor %q containing merge commit %s", minor, shortSHA(r.cfg.MergeCommitSHA))
 	}
 
-	// Pass 2: prereleases. Always consulted as a fallback when no full release
-	// contains the commit (this is desired even when --include-prereleases is
-	// off, per spec: use the latest prerelease that includes the change).
+	// Prereleases remain the fallback when no full release contains the commit.
 	if tag, ok := r.newestContainingTag(ctx, prereleases); ok {
 		return tag, tag, SourceTagComparePrerel,
 			fmt.Sprintf("newest prerelease for minor %q containing merge commit %s (no full release contains it)", minor, shortSHA(r.cfg.MergeCommitSHA))

@@ -45,10 +45,8 @@ func NewClassifier(llmClient *llm.Client, env *envconfig.PipelineEnv) *Classifie
 	return &Classifier{llmClient: llmClient, env: env}
 }
 
-// ClassifyByPattern attempts to classify an error using regex patterns only.
-// Returns nil if no pattern matches.
+// ClassifyByPattern returns the first regex classification, or nil.
 func (c *Classifier) ClassifyByPattern(testName, pkg, errorText string) *Classification {
-	// Check EnvPatterns first (most common in CI).
 	for _, rule := range EnvPatterns {
 		if rule.Pattern.MatchString(errorText) {
 			return &Classification{
@@ -63,7 +61,6 @@ func (c *Classifier) ClassifyByPattern(testName, pkg, errorText string) *Classif
 		}
 	}
 
-	// Then TestDefectPatterns.
 	for _, rule := range TestDefectPatterns {
 		if rule.Pattern.MatchString(errorText) {
 			return &Classification{
@@ -79,7 +76,6 @@ func (c *Classifier) ClassifyByPattern(testName, pkg, errorText string) *Classif
 		}
 	}
 
-	// Then ProductDefectPatterns.
 	for _, rule := range ProductDefectPatterns {
 		if rule.Pattern.MatchString(errorText) {
 			return &Classification{

@@ -127,11 +127,9 @@ func (c *Client) Complete(ctx context.Context, systemPrompt, userMessage string,
 		return "", fmt.Errorf("llm: messages.New failed after retries: %w", err)
 	}
 
-	// Record token usage.
 	c.totalInputTokens.Add(response.Usage.InputTokens)
 	c.totalOutputTokens.Add(response.Usage.OutputTokens)
 
-	// Extract text from response content blocks.
 	var parts []string
 	for _, block := range response.Content {
 		if block.Type == "text" {
@@ -189,11 +187,9 @@ func isRetryableError(err error) bool {
 func stripMarkdownFences(s string) string {
 	s = strings.TrimSpace(s)
 	if strings.HasPrefix(s, "```") {
-		// Remove opening fence (e.g. ```json or just ```)
 		if idx := strings.Index(s, "\n"); idx != -1 {
 			s = s[idx+1:]
 		}
-		// Remove closing fence
 		if strings.HasSuffix(s, "```") {
 			s = s[:len(s)-3]
 		}

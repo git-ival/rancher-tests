@@ -1,57 +1,12 @@
 #!/usr/bin/env groovy
 
 /**
- * Jenkinsfile.agentic-qa
+ * Agentic QA pipeline.
  *
- * Agentic QA Pipeline — AI-driven test identification, execution,
- * analysis, and automated remediation for rancher/rancher changes.
- *
- * ──────────────────────────────────────────────────────────────────
- * PARAMETER OWNERSHIP
- * ──────────────────────────────────────────────────────────────────
- * ALL parameters are defined exclusively in qa-agentic-qa-pipeline.yml
- * (jenkins-job-builder). This file contains NO parameters{} block.
- *
- * TRIGGER: MANUAL ONLY — use "Build with Parameters" in the Jenkins UI.
- *
- * ──────────────────────────────────────────────────────────────────
- * CONTAINER BUILD PATTERN
- * ──────────────────────────────────────────────────────────────────
- * Matches the pattern used by Jenkinsfile.individual.e2e:
- *   1. Checkout — GitSCM with CleanCheckout extension
- *   2. Build Image — `docker build` from Dockerfile.agentic-qa
- *   3. Run steps — `docker run --rm --env-file ...` per stage
- *   4. Cleanup — `docker rmi -f` in post { always }
- *
- * ──────────────────────────────────────────────────────────────────
- * CREDENTIAL HANDLING
- * ──────────────────────────────────────────────────────────────────
- * Text credentials are written to an env file (.agentic_env) that is
- * passed to every `docker run` invocation via --env-file.
- * The Google SA JSON file (GOOGLE_APPLICATION_CREDENTIALS) is mounted
- * into the container at /run/google_creds.json.
- * Neither the env file nor the credential paths are shell-interpolated
- * into command arguments; they are written by Groovy and referenced
- * by fixed workspace-relative paths.
- *
- * ──────────────────────────────────────────────────────────────────
- * SHELL INJECTION HARDENING
- * ──────────────────────────────────────────────────────────────────
- * All user-supplied string parameters are validated against strict
- * allowlist regexes before being written to the env file or used in
- * any shell call. The env file approach keeps secrets out of process
- * arguments entirely (not visible in `ps` output).
- *
- * Required Credentials (Jenkins Credential Store):
- *   github-api-token        Secret text — GitHub PAT
- *   qase-api-token          Secret text — Qase API token
- *   claude-api-key          Secret text — Anthropic API key
- *   google-vertex-sa-key    Secret file — Google SA JSON key
- *   github-copilot-token    Secret text — Copilot token
- *   github-mcp-token        Secret text — GitHub MCP token (optional)
+ * JJB defines parameters. Fixed workspace files stage validated input and
+ * credentials without exposing secrets in shell arguments.
  */
 
-// ── Allowlist patterns — validated before touching any shell ──────
 @groovy.transform.Field
 static final Map<String, java.util.regex.Pattern> PAT = [
     PR_NUMBER:     ~/^\d{1,10}$/,
@@ -68,22 +23,19 @@ static final Map<String, java.util.regex.Pattern> PAT = [
     MCP_URL:       ~/^https?:\/\/[A-Za-z0-9_.\-]+(:\d{1,5})?\/(mcp|sse)$/,
 ]
 
-// Unique image name for this build — avoids conflicts on shared nodes
 @groovy.transform.Field
 static final String IMAGE_BASE = 'rancher-agentic-qa'
 
 def AGENTIC_IMAGE = ''
 def PIPELINE_RESULT = [:]
 
-// ── Fixed workspace-relative paths (never user-controlled) ────────
-def ENV_FILE      = '.agentic_env'              // docker --env-file
-def GCP_CREDS     = '.google_creds.json'        // SA key copy in workspace
-def CTX_FILE      = '.agentic_context.txt'      // ADDITIONAL_CONTEXT staging
-def STATE_FILE    = 'pipeline_state.json'        // resource tracking for cleanup
-def TRIGGER_MAP   = 'jenkins_trigger_mapping.json' // written from JENKINS_TRIGGER_MAPPING param
+def ENV_FILE      = '.agentic_env'
+def GCP_CREDS     = '.google_creds.json'
+def CTX_FILE      = '.agentic_context.txt'
+def STATE_FILE    = 'pipeline_state.json'
+def TRIGGER_MAP   = 'jenkins_trigger_mapping.json'
 
 pipeline {
-    // Same agent type as Jenkinsfile.individual.e2e — any Docker-capable node.
     agent any
 
     options {
@@ -94,20 +46,13 @@ pipeline {
         disableConcurrentBuilds()
     }
 
-    // NO parameters{} block — defined solely in qa-agentic-qa-pipeline.yml.
+    // JJB defines parameters.
 
     stages {
 
-        ////////////////////////////////////////////////////////////////////////
-        // STAGE 0: CHECKOUT
-        // Explicit GitSCM checkout — matches Jenkinsfile.individual.e2e pattern.
-        // The pipeline-scm checkout delivers the Jenkinsfile; this checkout
-        // ensures the correct TESTS_BRANCH is present for the Docker build.
-        ////////////////////////////////////////////////////////////////////////
         stage('Checkout') {
             steps {
                 script {
-                    // Validate SCM parameters before touching Git
                     if (!params.TESTS_REPO_URL?.trim() ||
                         !params.TESTS_REPO_URL.matches(PAT.HTTPS_GIT_URL))
                         error("TESTS_REPO_URL must be an HTTPS GitHub URL. " +
@@ -131,16 +76,8 @@ pipeline {
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STAGE 1: VALIDATE PARAMETERS & WRITE CREDENTIAL FILES
-        // Validates all user parameters with strict regex allowlists.
-        // Writes the env file and stages credentials — no shell interpolation.
-        ////////////////////////////////////////////////////////////////////////
         stage('Setup') {
             steps {
-                // Bind all credentials in a single withCredentials block.
-                // Text credentials → env vars written to .agentic_env.
-                // File credential → copied to workspace as .google_creds.json.
                 withCredentials([
                     string(credentialsId: 'github-api-token',     variable: 'GITHUB_TOKEN'),
                     string(credentialsId: 'qase-api-token',       variable: 'QASE_API_TOKEN'),
@@ -150,8 +87,6 @@ pipeline {
                     string(credentialsId: 'github-mcp-token',     variable: 'GITHUB_MCP_TOKEN'),
                 ]) {
                     script {
-                        // ── Validate all parameters ───────────────────────────
-
                         def prRaw = params.RANCHER_PR_NUMBER?.trim() ?: ''
                         if (!prRaw.matches(PAT.PR_NUMBER))
                             error("RANCHER_PR_NUMBER must be 1-10 digits. Got: '${prRaw.take(30)}'")
@@ -188,14 +123,9 @@ pipeline {
                         if (!params.MAX_RERUNS.matches(PAT.MAX_RERUNS))
                             error("MAX_RERUNS must be 0-10. Got: '${params.MAX_RERUNS.take(5)}'")
 
-                        // ── Stage ADDITIONAL_CONTEXT to file (never a shell arg) ──
                         writeFile file: CTX_FILE, text: params.ADDITIONAL_CONTEXT ?: ''
 
-                        // ── Validate and stage JENKINS_TRIGGER_MAPPING ────────────
-                        // The mapping JSON is supplied as a parameter (not committed
-                        // to the repo) because it contains internal Jenkins job names
-                        // and infrastructure details. Validate it is non-empty and
-                        // parses as valid JSON before writing to the workspace.
+                        // Validate sensitive runtime mapping before staging it.
                         def triggerMapRaw = params.JENKINS_TRIGGER_MAPPING?.trim() ?: ''
                         if (!triggerMapRaw) {
                             error('JENKINS_TRIGGER_MAPPING is required and must not be empty. ' +
@@ -206,34 +136,22 @@ pipeline {
                         } catch (jsonEx) {
                             error("JENKINS_TRIGGER_MAPPING is not valid JSON: ${jsonEx.message}")
                         }
-                        // Write to workspace — content is NEVER echoed or logged.
+                        // Never log mapping contents.
                         writeFile file: TRIGGER_MAP, text: triggerMapRaw
                         sh "chmod 600 '${TRIGGER_MAP}'"
 
-                        // ── Write Google SA key to workspace for container mount ──
-                        // GOOGLE_SA_FILE is an agent-local path from Jenkins credentials.
-                        // sh copy via absolute path — no secret value touches a shell arg.
+                        // Copy the Jenkins credential without exposing its contents.
                         sh "cp '${GOOGLE_SA_FILE}' '${GCP_CREDS}'"
 
-                        // ── Initialize pipeline_state.json ────────────────────────
                         writeJSON file: STATE_FILE, json: [
                             qase_runs: [], qase_defects: [],
                             github_issues: [], github_prs: [],
                         ]
 
-                        // ── Write env file for docker run --env-file ──────────────
-                        // Credentials are written here by Groovy — never interpolated
-                        // into shell command strings. The file is chmod 600 immediately.
-                        //
-                        // SECURITY: All values written are either:
-                        //   a) Validated against strict regex patterns (above), OR
-                        //   b) Opaque credential tokens from Jenkins (not user-supplied)
-                        //
-                        // The docker run commands reference this file by its fixed path;
-                        // no credential value is ever in a shell argument.
+                        // Stage validated values and credentials in a mode-600 env file.
+                        // Never place credential values in shell arguments.
                         def envLines = []
 
-                        // Credentials (from Jenkins credential store)
                         envLines += "GITHUB_TOKEN=${GITHUB_TOKEN}"
                         envLines += "QASE_API_TOKEN=${QASE_API_TOKEN}"
                         envLines += "CLAUDE_API_KEY=${CLAUDE_API_KEY}"
@@ -241,7 +159,6 @@ pipeline {
                         envLines += "COPILOT_TOKEN=${COPILOT_TOKEN}"
                         envLines += "GITHUB_MCP_TOKEN=${GITHUB_MCP_TOKEN}"
 
-                        // Validated parameters
                         envLines += "AGENTIC_PR_NUMBER=${prRaw}"
                         envLines += "AGENTIC_REPO=${params.RANCHER_REPO}"
                         envLines += "AGENTIC_PROVIDER=${params.LLM_PROVIDER}"
@@ -277,12 +194,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STAGE 2: BUILD CONTAINER IMAGE
-        // Matches the `docker build` pattern from Jenkinsfile.individual.e2e.
-        // Build context is the repo root (WORKSPACE) so COPY . . in the
-        // Dockerfile picks up the full source tree including go.mod/go.sum.
-        ////////////////////////////////////////////////////////////////////////
         stage('Build Container') {
             steps {
                 script {
@@ -300,15 +211,11 @@ All inputs validated."""
 
                     echo "Built image: ${AGENTIC_IMAGE}"
 
-                    // Smoke-test: verify the binary exists and responds
                     sh "docker run --rm ${AGENTIC_IMAGE} --help > /dev/null"
                 }
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STAGE 3: VALIDATE CREDENTIALS
-        ////////////////////////////////////////////////////////////////////////
         stage('Validate Credentials') {
             steps {
                 script {
@@ -328,14 +235,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // HELPER: shared docker run wrapper
-        // All steps call _run() to ensure consistent flags.
-        ////////////////////////////////////////////////////////////////////////
-
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 1: IDENTIFY TESTS                                      [Haiku]
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 1: Identify Tests') {
             steps {
                 script {
@@ -370,9 +269,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 2: TRIGGER TESTS                                  [Direct API]
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 2: Trigger Tests') {
             when {
                 allOf {
@@ -417,9 +313,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 2b: WAIT FOR TEST COMPLETION
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 2b: Wait for Tests') {
             when {
                 allOf {
@@ -458,9 +351,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 3: ANALYZE RESULTS (TRIAGE)                          [Sonnet]
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 3: Analyze Results') {
             when {
                 expression {
@@ -503,9 +393,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 4: HANDLE DEFECTS                            [Sonnet + Haiku]
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 4: Handle Defects') {
             when {
                 expression {
@@ -552,9 +439,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 5: HANDLE CONFIG FAILURES                    [Haiku + Sonnet]
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 5: Handle Config Failures') {
             when {
                 expression { PIPELINE_RESULT['triage']?.config_issues?.size() > 0 }
@@ -597,9 +481,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // STEP 6: CLEANUP (when CLEANUP_MODE=true)
-        ////////////////////////////////////////////////////////////////////////
         stage('Step 6: Cleanup') {
             when { expression { params.CLEANUP_MODE } }
             steps {
@@ -631,9 +512,6 @@ All inputs validated."""
             }
         }
 
-        ////////////////////////////////////////////////////////////////////////
-        // SUMMARY
-        ////////////////////////////////////////////////////////////////////////
         stage('Summary') {
             steps {
                 script {
@@ -647,25 +525,20 @@ All inputs validated."""
 
     post {
         always {
-            // Remove the built image
             script {
                 if (AGENTIC_IMAGE) {
                     sh "docker rmi -f ${AGENTIC_IMAGE} || true"
                 }
             }
-            // Archive outputs; delete sensitive files
             archiveArtifacts artifacts: 'pipeline_summary.json, cleanup_result.json',
                              allowEmptyArchive: true
-            // Remove all sensitive staging files from workspace.
-            // TRIGGER_MAP contains internal job names — must not persist.
+            // Remove sensitive staging files, including the internal job mapping.
             sh """
                 rm -f '${ENV_FILE}' '${GCP_CREDS}' '${CTX_FILE}' '${TRIGGER_MAP}' || true
             """
         }
     }
 }
-
-// ── Helpers ───────────────────────────────────────────────────────
 
 def buildSummary(Map r) {
     def sep = '=' * 70
