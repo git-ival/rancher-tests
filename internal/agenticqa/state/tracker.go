@@ -87,6 +87,9 @@ func (t *Tracker) saveUnsafe(s *PipelineState) error {
 	data = append(data, '\n')
 
 	dir := filepath.Dir(t.path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("creating pipeline state directory %s: %w", dir, err)
+	}
 	tmp, err := os.CreateTemp(dir, "pipeline_state_*.json.tmp")
 	if err != nil {
 		return fmt.Errorf("creating temp file for pipeline state: %w", err)
@@ -120,6 +123,25 @@ func (t *Tracker) Init() error {
 		GithubPRs:    []GithubPRRef{},
 	}
 	return t.Save(s)
+}
+
+// Ensure creates empty state when missing.
+func (t *Tracker) Ensure() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	if _, err := os.Stat(t.path); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("checking pipeline state %s: %w", t.path, err)
+	}
+
+	return t.saveUnsafe(&PipelineState{
+		QaseRuns:     []QaseRunRef{},
+		QaseDefects:  []QaseDefectRef{},
+		GithubIssues: []GithubIssueRef{},
+		GithubPRs:    []GithubPRRef{},
+	})
 }
 
 // AddQaseRun atomically appends a Qase run reference to the state.
@@ -183,6 +205,14 @@ func (t *Tracker) AddGithubPR(repo string, prNumber int) error {
 func (t *Tracker) loadUnsafe() (*PipelineState, error) {
 	data, err := os.ReadFile(t.path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return &PipelineState{
+				QaseRuns:     []QaseRunRef{},
+				QaseDefects:  []QaseDefectRef{},
+				GithubIssues: []GithubIssueRef{},
+				GithubPRs:    []GithubPRRef{},
+			}, nil
+		}
 		return nil, fmt.Errorf("reading pipeline state from %s: %w", t.path, err)
 	}
 

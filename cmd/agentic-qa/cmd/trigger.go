@@ -184,6 +184,11 @@ var triggerCmd = &cobra.Command{
 	Long:  `Loads identified tests and triggers corresponding Jenkins jobs. Creates a Qase test run for tracking.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		ctx := cmd.Context()
+		if stateFile != "" {
+			if err := state.NewTracker(stateFile).Ensure(); err != nil {
+				return fmt.Errorf("initializing pipeline state: %w", err)
+			}
+		}
 
 		var identified types.IdentifiedTests
 		if err := loadJSON(triggerIdentifiedTests, &identified); err != nil {
