@@ -2,6 +2,7 @@ package jenkins
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/avast/retry-go/v4"
 	"github.com/sirupsen/logrus"
@@ -29,6 +31,7 @@ type Client struct {
 	httpClient *http.Client
 	user       string
 	token      string
+	authHeader string
 	crumbField string
 	crumbValue string
 }
@@ -61,18 +64,57 @@ type buildResponse struct {
 	Building bool    `json:"building"`
 }
 
+type whoAmIResponse struct {
+	Authenticated bool   `json:"authenticated"`
+	Name          string `json:"name"`
+}
+
 // NewClient creates a Jenkins client.
 // It attempts to fetch a CSRF crumb; errors are logged but not fatal
 // (CSRF protection may be disabled on the instance).
 func NewClient(baseURL, user, token string) *Client {
+	token, authHeader := normalizeCredential(token)
 	c := &Client{
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		httpClient: &http.Client{Timeout: jenkinsHTTPTimeout},
 		user:       user,
 		token:      token,
+		authHeader: authHeader,
 	}
 	c.fetchCrumb()
 	return c
+}
+
+func normalizeCredential(token string) (string, string) {
+	token = strings.TrimSpace(token)
+	if len(token) >= len("Basic ") && strings.EqualFold(token[:len("Basic ")], "Basic ") {
+		token = strings.TrimSpace(token[len("Basic "):])
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(token)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(token)
+	}
+	if err != nil || len(decoded) == 0 || !utf8.Valid(decoded) {
+		return token, ""
+	}
+	for _, r := range string(decoded) {
+		if r < 0x20 || r > 0x7e {
+			return token, ""
+		}
+	}
+	if strings.ContainsRune(string(decoded), ':') {
+		return "", "Basic " + base64.StdEncoding.EncodeToString(decoded)
+	}
+	return string(decoded), ""
+}
+
+func (c *Client) setAuth(req *http.Request) {
+	if c.authHeader != "" {
+		req.Header.Set("Authorization", c.authHeader)
+		return
+	}
+	req.SetBasicAuth(c.user, c.token)
 }
 
 // fetchCrumb attempts to retrieve the Jenkins CSRF crumb.
@@ -84,7 +126,7 @@ func (c *Client) fetchCrumb() {
 		logrus.Debugf("jenkins: failed to build crumb request: %v", err)
 		return
 	}
-	req.SetBasicAuth(c.user, c.token)
+	c.setAuth(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -109,6 +151,34 @@ func (c *Client) fetchCrumb() {
 	logrus.Debugf("jenkins: fetched CSRF crumb (field=%s)", c.crumbField)
 }
 
+// ValidateAuth verifies that Jenkins recognizes the configured credentials.
+func (c *Client) ValidateAuth(ctx context.Context) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/whoAmI/api/json", nil)
+	if err != nil {
+		return "", fmt.Errorf("building authentication request: %w", err)
+	}
+	c.setAuth(req)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("checking authentication: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		return "", fmt.Errorf("authentication returned status %d", resp.StatusCode)
+	}
+
+	var who whoAmIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&who); err != nil {
+		return "", fmt.Errorf("decoding authentication response: %w", err)
+	}
+	if !who.Authenticated {
+		return "", fmt.Errorf("Jenkins reported an anonymous session")
+	}
+	return who.Name, nil
+}
+
 // TriggerBuild triggers a parameterized build and returns the queue item ID.
 func (c *Client) TriggerBuild(ctx context.Context, folder, jobName string, params map[string]string) (int, error) {
 	buildURL := fmt.Sprintf("%s/job/%s/job/%s/buildWithParameters", c.baseURL, folder, jobName)
@@ -126,7 +196,7 @@ func (c *Client) TriggerBuild(ctx context.Context, folder, jobName string, param
 		}
 
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.SetBasicAuth(c.user, c.token)
+		c.setAuth(req)
 		if c.crumbField != "" {
 			req.Header.Set(c.crumbField, c.crumbValue)
 		}
@@ -195,7 +265,7 @@ func (c *Client) GetQueueBuildNumber(ctx context.Context, queueID int) (int, err
 		if err != nil {
 			return fmt.Errorf("building queue request: %w", err)
 		}
-		req.SetBasicAuth(c.user, c.token)
+		c.setAuth(req)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -246,7 +316,7 @@ func (c *Client) GetBuildStatus(ctx context.Context, folder, jobName string, bui
 		if err != nil {
 			return fmt.Errorf("building build status request: %w", err)
 		}
-		req.SetBasicAuth(c.user, c.token)
+		c.setAuth(req)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {

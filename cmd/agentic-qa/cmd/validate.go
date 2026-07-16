@@ -8,6 +8,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
+	"github.com/rancher/tests/internal/agenticqa/jenkins"
 	"github.com/rancher/tests/internal/agenticqa/qase"
 )
 
@@ -18,11 +19,10 @@ func init() {
 var validateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Validate credential connectivity",
-	Long:  `Checks GitHub, Qase, and LLM provider credentials are valid and reachable.`,
+	Long:  `Checks GitHub, Qase, Jenkins, and LLM provider credentials.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		var failures int
 
-		// 1. GitHub token
 		ghToken := os.Getenv(githubTokenEnvVar)
 		if ghToken == "" {
 			logrus.Errorf("%s is not set", githubTokenEnvVar)
@@ -50,7 +50,6 @@ var validateCmd = &cobra.Command{
 			}
 		}
 
-		// 2. Qase token
 		qaseToken := os.Getenv(qaseApiTokenEnvVar)
 		if qaseToken == "" {
 			logrus.Errorf("%s is not set", qaseApiTokenEnvVar)
@@ -78,7 +77,29 @@ var validateCmd = &cobra.Command{
 			}
 		}
 
-		// 3. LLM provider
+		jenkinsURL := os.Getenv(jenkinsURLEnvVar)
+		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
+		switch {
+		case jenkinsURL == "":
+			logrus.Errorf("%s is not set", jenkinsURLEnvVar)
+			failures++
+		case jenkinsUser == "":
+			logrus.Errorf("%s is not set", jenkinsUserEnvVar)
+			failures++
+		case jenkinsToken == "":
+			logrus.Errorf("%s is not set", jenkinsTokenEnvVar)
+			failures++
+		default:
+			name, err := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken).ValidateAuth(cmd.Context())
+			if err != nil {
+				logrus.Errorf("Jenkins: %v", err)
+				failures++
+			} else {
+				logrus.Infof("Jenkins: OK (%s)", name)
+			}
+		}
+
 		switch provider {
 		case llmProviderClaudeDirect:
 			apiKey := os.Getenv(claudeAPIKeyEnvVar)
