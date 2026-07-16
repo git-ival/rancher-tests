@@ -4,12 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strconv"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
 	"github.com/rancher/tests/internal/agenticqa/envconfig"
 	"github.com/rancher/tests/internal/agenticqa/llm"
+	"github.com/rancher/tests/internal/agenticqa/runconfig"
 )
 
 var (
@@ -22,11 +25,13 @@ var (
 	mcpURL          string
 	stateFile       string
 	pipelineEnvFile string
+	configFile      string
 	dryRun          bool
 	localTest       bool
 
 	// pipelineEnv is loaded once; nil means callers use generated defaults.
 	pipelineEnv *envconfig.PipelineEnv
+	runConfig   *runconfig.Config
 )
 
 const (
@@ -53,6 +58,7 @@ const (
 	mcpURLFlag         = "mcp-url"
 	stateFileFlag      = "state-file"
 	pipelineEnvFlag    = "pipeline-env"
+	configFlag         = "config"
 	dryRunFlag         = "dry-run"
 	localTestFlag      = "local-test"
 
@@ -148,6 +154,18 @@ var rootCmd = &cobra.Command{
   11. cleanup   - Clean up pipeline-created resources
   12. validate  - Validate credential connectivity`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if configFile != "" {
+			cfg, err := runconfig.Load(configFile)
+			if err != nil {
+				return fmt.Errorf("--%s: %w", configFlag, err)
+			}
+			runConfig = cfg
+			if err := applyRunConfig(cmd, cfg); err != nil {
+				return err
+			}
+			logrus.Infof("Loaded run config from %s", configFile)
+		}
+
 		// Generator commands may run without pipeline_env.json.
 		if pipelineEnvFile != "" {
 			env, err := envconfig.Load(pipelineEnvFile)
@@ -206,8 +224,123 @@ func init() {
 	pf.StringVar(&mcpURL, mcpURLFlag, "", "Qase MCP server URL")
 	pf.StringVar(&stateFile, stateFileFlag, "", "Path to pipeline_state.json")
 	pf.StringVar(&pipelineEnvFile, pipelineEnvFlag, "", "Path to pipeline_env.json (organisation-specific config, not committed to VCS)")
+	pf.StringVar(&configFile, configFlag, "", "Path to agentic-qa.yaml")
 	pf.BoolVar(&dryRun, dryRunFlag, false, "Dry-run mode (no side effects)")
 	pf.BoolVar(&localTest, localTestFlag, false, "Local test mode: creates real artifacts prefixed with [LOCAL-TEST], creates GitHub PRs as drafts, and skips Jenkins triggers. Use to validate the full pipeline flow without polluting production tracking.")
+}
+
+func applyRunConfig(cmd *cobra.Command, cfg *runconfig.Config) error {
+	set := func(name, value string) error {
+		if value == "" {
+			return nil
+		}
+		flag := cmd.Flag(name)
+		if flag == nil || flag.Changed {
+			return nil
+		}
+		if err := flag.Value.Set(value); err != nil {
+			return fmt.Errorf("setting --%s from --%s: %w", name, configFlag, err)
+		}
+		flag.Changed = true
+		return nil
+	}
+	setBool := func(name string, value bool) error {
+		if !value {
+			return nil
+		}
+		return set(name, strconv.FormatBool(value))
+	}
+	setInt := func(name string, value *int) error {
+		if value == nil {
+			return nil
+		}
+		return set(name, strconv.Itoa(*value))
+	}
+
+	for _, item := range []struct{ name, value string }{
+		{stateFileFlag, cfg.Paths.Outputs.State},
+		{pipelineEnvFlag, cfg.Paths.Inputs.PipelineEnv},
+		{providerFlag, cfg.LLM.Provider},
+		{vertexProjectFlag, cfg.LLM.VertexProject},
+		{vertexLocationFlag, cfg.LLM.VertexLocation},
+		{sonnetModelFlag, cfg.LLM.SonnetModel},
+		{haikuModelFlag, cfg.LLM.HaikuModel},
+		{qaseProjectFlag, cfg.Qase.Project},
+		{mcpURLFlag, cfg.Qase.MCPURL},
+	} {
+		if err := set(item.name, item.value); err != nil {
+			return err
+		}
+	}
+	if err := setBool(dryRunFlag, cfg.Execution.DryRun); err != nil {
+		return err
+	}
+	if err := setBool(localTestFlag, cfg.Execution.LocalTest); err != nil {
+		return err
+	}
+
+	in, out := cfg.Paths.Inputs, cfg.Paths.Outputs
+	var values map[string]string
+	switch cmd.Name() {
+	case genFeatureMapCommandName:
+		values = map[string]string{genFeatureMapValidationDirFlag: in.ValidationDir, genFeatureMapActionsDirFlag: in.ActionsDir, outputFileFlag: out.FeatureMapping}
+	case genTriggerMapCommandName:
+		values = map[string]string{genTriggerMapJJBDirFlag: in.JJBDir, outputFileFlag: out.TriggerMapping}
+	case genPipelineEnvCommandName:
+		values = map[string]string{outputFileFlag: out.PipelineEnv}
+	case identifyCommandName:
+		values = map[string]string{repoFlag: cfg.Source.Repo, identifyMappingFileFlag: in.FeatureMapping, additionalContextFlag: in.AdditionalContext, outputFileFlag: out.IdentifiedTests}
+		if cfg.Source.PR != 0 {
+			pr := cfg.Source.PR
+			if err := setInt(prNumberFlag, &pr); err != nil {
+				return err
+			}
+		}
+	case planEnvironmentCommandName:
+		values = map[string]string{identifiedTestsFlag: out.IdentifiedTests, planEnvTestRepoFlag: in.TestRepoRoot, planEnvChartsDirFlag: in.ChartsDir, outputFileFlag: out.EnvironmentPlan, planEnvOutputDirFlag: out.EnvironmentArtifacts, planEnvSizingProfileFlag: cfg.Environment.SizingProfile}
+		for name, value := range map[string]bool{planEnvStaticOnlyFlag: cfg.Environment.StaticOnly, planEnvRecommendFlag: cfg.Environment.RecommendSpecs, planEnvResolveVersionsFlag: cfg.Environment.ResolveVersions, planEnvIncludePrereleasesFlag: cfg.Environment.IncludePrerelease} {
+			if err := setBool(name, value); err != nil {
+				return err
+			}
+		}
+	case triggerCommandName:
+		values = map[string]string{repoFlag: cfg.Source.Repo, identifiedTestsFlag: out.IdentifiedTests, triggerMappingFlag: in.TriggerMapping, outputFileFlag: out.TriggeredJobs, triggerTestTimeoutFlag: cfg.Execution.TestTimeout, jenkinsURLFlag: cfg.Jenkins.URL}
+		if cfg.Source.PR != 0 {
+			pr := cfg.Source.PR
+			if err := setInt(prNumberFlag, &pr); err != nil {
+				return err
+			}
+		}
+	case waitCommandName:
+		values = map[string]string{waitTriggeredJobsFlag: out.TriggeredJobs, outputFileFlag: out.CompletedJobs, jenkinsURLFlag: cfg.Jenkins.URL}
+	case analyzeCommandName:
+		values = map[string]string{analyzeCompletedJobsFlag: out.CompletedJobs, analyzeTriageFrameworkFlag: in.TriageFramework, analyzeFeatureMappingFlag: in.FeatureMapping, additionalContextFlag: in.AdditionalContext, outputFileFlag: out.TriageResults}
+	case defectsCommandName:
+		values = map[string]string{triageResultsFlag: out.TriageResults, outputFileFlag: out.DefectActions}
+	case configFailuresCommandName:
+		values = map[string]string{triageResultsFlag: out.TriageResults, triggerMappingFlag: in.TriggerMapping, outputFileFlag: out.ConfigActions, jenkinsURLFlag: cfg.Jenkins.URL}
+		if err := setInt(cfMaxRerunsFlag, cfg.Execution.MaxReruns); err != nil {
+			return err
+		}
+	case cleanupCommandName:
+		values = map[string]string{outputFileFlag: out.CleanupResult}
+	}
+	for name, value := range values {
+		if err := set(name, value); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func activeJenkinsUser() string {
+	if user := os.Getenv(jenkinsUserEnvVar); user != "" {
+		return user
+	}
+	if runConfig != nil {
+		return runConfig.Jenkins.User
+	}
+	return ""
 }
 
 // Execute runs the root command.
@@ -238,5 +371,18 @@ func saveJSON(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("marshaling: %w", err)
 	}
+	if err := ensureOutputParent(path); err != nil {
+		return err
+	}
 	return os.WriteFile(path, data, 0644)
+}
+
+func ensureOutputParent(path string) error {
+	if path == "" || path == "-" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("creating output directory: %w", err)
+	}
+	return nil
 }
