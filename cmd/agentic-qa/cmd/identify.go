@@ -197,6 +197,10 @@ If an identified test has no mapped qase_cases, identify fails with an error.`,
 		result.PRURL = prInfo.URL
 		result.PRTitle = prInfo.Title
 		result.ChangedFiles = files
+		result.Repo = identifyRepo
+		result.Merged = prInfo.Merged
+		result.MergeCommitSHA = prInfo.MergeCommitSHA
+		result.BaseRef = prInfo.Base
 
 		// Enrich identified tests using only qase_cases from the pre-generated mapping.
 		if err := enrichQaseCasesFromMapping(&result, &mapping); err != nil {

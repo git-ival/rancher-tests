@@ -29,6 +29,10 @@ var (
 	planEnvRecommendSpecs  bool
 	planEnvSizingProfile   string
 	planEnvChartsDir       string
+
+	planEnvResolveVersions    bool
+	planEnvIncludePrereleases bool
+	planEnvGithubToken        string
 )
 
 const (
@@ -40,6 +44,10 @@ const (
 	planEnvRecommendFlag     = "recommend-specs"
 	planEnvSizingProfileFlag = "sizing-profile"
 	planEnvChartsDirFlag     = "charts-dir"
+
+	planEnvResolveVersionsFlag    = "resolve-versions"
+	planEnvIncludePrereleasesFlag = "include-prereleases"
+	planEnvGithubTokenFlag        = "github-token"
 
 	planEnvDefaultOutputDir = "environment-plan"
 	planEnvCattleSubdir     = "cattle-config"
@@ -61,6 +69,9 @@ func init() {
 	f.BoolVar(&planEnvNoUpstream, planEnvNoUpstreamFlag, false, "Do not generate the upstream (Rancher management cluster) recommendation or its qa-infra artifacts")
 	f.BoolVar(&planEnvRecommendSpecs, planEnvRecommendFlag, false, "Recommend per-node machine specs (vCPU/memory/disk, instanceType) from heuristics + LLM refinement, and write them into the cattle-config")
 	f.StringVar(&planEnvChartsDir, planEnvChartsDirFlag, "", "Path to a local rancher/charts checkout (or its charts/ dir) for resolving Helm-chart resource footprints; falls back to the curated catalog when unset/unavailable")
+	f.BoolVar(&planEnvResolveVersions, planEnvResolveVersionsFlag, false, "Resolve concrete Rancher/Kubernetes/cert-manager versions from GitHub/KDM instead of leaving ${VAR} placeholders (requires identified_tests.json to carry repo/merge-commit info from `identify`)")
+	f.BoolVar(&planEnvIncludePrereleases, planEnvIncludePrereleasesFlag, false, "With --resolve-versions, allow RC/alpha/beta releases as resolution candidates")
+	f.StringVar(&planEnvGithubToken, planEnvGithubTokenFlag, "", fmt.Sprintf("GitHub token for --%s (defaults to $%s)", planEnvResolveVersionsFlag, githubTokenEnvVar))
 
 	_ = planEnvironmentCmd.MarkFlagRequired(identifiedTestsFlag)
 	_ = planEnvironmentCmd.MarkFlagRequired(outputFileFlag)
@@ -178,6 +189,25 @@ memorySize/diskSize).`,
 			chartSizingCfg.Source.LocalPath = planEnvChartsDir
 		}
 
+		// Resolve concrete versions from GitHub/KDM/release metadata, replacing
+		// the ${VAR} placeholders in upstreamCfg and cattleTmpl. Opt-in because
+		// it requires network access and identify to have persisted repo/merge
+		// commit info; disabled by default so existing envsubst-based pipelines
+		// are unaffected.
+		var versionRes *types.VersionResolution
+		if planEnvResolveVersions {
+			downstreamDistros := make([]string, 0, len(cattleTmpl.KubernetesVersionEnvByDistro))
+			for distro := range cattleTmpl.KubernetesVersionEnvByDistro {
+				downstreamDistros = append(downstreamDistros, distro)
+			}
+			sort.Strings(downstreamDistros)
+
+			versionRes = resolveEnvironmentVersions(ctx, identified, upstreamCfg.KubernetesDistro, downstreamDistros, env.VersionResolution)
+			if versionRes != nil {
+				applyResolvedVersions(&upstreamCfg, cattleTmpl.KubernetesVersionEnvByDistro, versionRes)
+			}
+		}
+
 		// Derived output directories under the consolidated --output-dir.
 		cattleConfigDir := filepath.Join(planEnvOutputDir, planEnvCattleSubdir)
 		upstreamDir := filepath.Join(planEnvOutputDir, planEnvUpstreamSubdir)
@@ -242,6 +272,7 @@ memorySize/diskSize).`,
 			GeneratedBy: "agentic-qa " + planEnvironmentCommandName,
 			Version:     mappingFileVersion,
 		}
+		plan.VersionResolution = versionRes
 
 		logrus.Infof("Derived environment for %d test(s): %d static, %d llm, %d default → strategy=%s, %d group(s)",
 			len(reqs), staticCount, llmCount, defaultCount, plan.Strategy, len(plan.Groups))
@@ -251,7 +282,15 @@ memorySize/diskSize).`,
 		// role baselines + workload pressure + chart footprints. Done per group
 		// (post-merge) because charts are group-level.
 		if planEnvRecommendSpecs {
-			resolver := envplan.NewChartFootprintResolver(chartSizingCfg, upstreamCfg.RancherVersion)
+			var resolver *envplan.ChartFootprintResolver
+			if versionRes != nil && versionRes.RancherMinor != "" {
+				// Prefer the authoritatively resolved minor so the chart branch
+				// tracks the true target Rancher version (e.g. 2.15) rather than
+				// a ${VAR}/dev placeholder.
+				resolver = envplan.NewChartFootprintResolverForMinor(chartSizingCfg, versionRes.RancherMinor)
+			} else {
+				resolver = envplan.NewChartFootprintResolver(chartSizingCfg, upstreamCfg.RancherVersion)
+			}
 			logrus.Infof("Using %s", resolver)
 			for i := range plan.Groups {
 				g := &plan.Groups[i]
