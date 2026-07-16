@@ -78,7 +78,10 @@ var validateCmd = &cobra.Command{
 		}
 
 		jenkinsURL := os.Getenv(jenkinsURLEnvVar)
-		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+		if jenkinsURL == "" && runConfig != nil {
+			jenkinsURL = runConfig.Jenkins.URL
+		}
+		jenkinsUser := activeJenkinsUser()
 		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 		switch {
 		case jenkinsURL == "":

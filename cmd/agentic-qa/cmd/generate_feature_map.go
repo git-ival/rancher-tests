@@ -161,6 +161,9 @@ func runGenerateFeatureMap(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("marshaling output: %w", err)
 	}
+	if err := ensureOutputParent(genFeatureMapOutputFile); err != nil {
+		return err
+	}
 	if err := os.WriteFile(genFeatureMapOutputFile, data, 0644); err != nil {
 		return fmt.Errorf("writing output: %w", err)
 	}

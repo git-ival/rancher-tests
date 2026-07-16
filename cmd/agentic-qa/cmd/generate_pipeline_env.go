@@ -71,6 +71,9 @@ private secrets store or passing it as a pipeline parameter.`,
 			return nil
 		}
 
+		if err := ensureOutputParent(genPipelineEnvOutput); err != nil {
+			return err
+		}
 		if err := os.WriteFile(genPipelineEnvOutput, data, 0600); err != nil {
 			return fmt.Errorf("writing pipeline_env to %q: %w", genPipelineEnvOutput, err)
 		}

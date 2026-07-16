@@ -262,7 +262,7 @@ var triggerCmd = &cobra.Command{
 			jenkinsURL = os.Getenv(jenkinsURLEnvVar)
 		}
 
-		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+		jenkinsUser := activeJenkinsUser()
 		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 
 		var triggeredJobs []types.TriggeredJob

@@ -84,7 +84,7 @@ var waitCmd = &cobra.Command{
 			jenkinsURL = os.Getenv(jenkinsURLEnvVar)
 		}
 
-		jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+		jenkinsUser := activeJenkinsUser()
 		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 		jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 

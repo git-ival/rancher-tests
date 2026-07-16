@@ -119,7 +119,7 @@ Respond with JSON: {"action": "rerun|guard", "reasoning": "string"}`
 					continue
 				}
 
-				jenkinsUser := os.Getenv(jenkinsUserEnvVar)
+				jenkinsUser := activeJenkinsUser()
 				jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 				jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 
