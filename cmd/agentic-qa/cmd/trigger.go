@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -25,6 +28,7 @@ var (
 	triggerRepo            string
 	triggerOutputFile      string
 	triggerJenkinsURL      string
+	triggerSetupEnvs       string
 )
 
 const (
@@ -43,6 +47,7 @@ func init() {
 	f.StringVar(&triggerRepo, repoFlag, defaultProductRepo, "Repository (owner/repo)")
 	f.StringVar(&triggerOutputFile, outputFileFlag, "", "Path to write triggered_jobs.json (required)")
 	f.StringVar(&triggerJenkinsURL, jenkinsURLFlag, "", "Jenkins server URL")
+	f.StringVar(&triggerSetupEnvs, "setup-environments", "", "Path to setup_environments.json")
 
 	_ = triggerCmd.MarkFlagRequired(identifiedTestsFlag)
 	_ = triggerCmd.MarkFlagRequired(triggerMappingFlag)
@@ -178,6 +183,175 @@ func resolveTriggerJobs(identified types.IdentifiedTests, triggerMapping map[str
 	return jobs
 }
 
+type triggerJobRuntime struct {
+	Folder      string
+	Name        string
+	Project     string
+	Environment string
+	Parameters  map[string]string
+}
+
+func buildTriggerRuntime(job string, identified types.IdentifiedTests, mapping map[string]any, setup *types.SetupEnvironments, timeout string) (triggerJobRuntime, error) {
+	config, ok := lookupJobConfig(mapping, job)
+	if !ok {
+		return triggerJobRuntime{}, fmt.Errorf("job %q is missing from trigger mapping", job)
+	}
+	declared, _ := config["parameters"].(map[string]any)
+	bindings := resolveJobBindings(config, declared)
+	if bindings.QaseRunID == "" {
+		return triggerJobRuntime{}, fmt.Errorf("job %q has no Qase run binding", job)
+	}
+	params := map[string]string{}
+	set := func(parameter, value string) error {
+		if parameter == "" || value == "" {
+			return nil
+		}
+		if _, ok := declared[parameter]; !ok {
+			return fmt.Errorf("job %q binding %q is not a declared parameter", job, parameter)
+		}
+		params[parameter] = value
+		return nil
+	}
+	if err := set(bindings.Timeout, timeout); err != nil {
+		return triggerJobRuntime{}, err
+	}
+
+	files, functions, tags := selectorsForJob(job, identified, mapping)
+	if len(files) == 1 {
+		if err := set(bindings.TestPackage, "./"+filepath.ToSlash(files[0])+"/..."); err != nil {
+			return triggerJobRuntime{}, err
+		}
+	}
+	if len(functions) > 0 {
+		parts := make([]string, len(functions))
+		for i, fn := range functions {
+			parts[i] = regexp.QuoteMeta(fn)
+		}
+		if err := set(bindings.TestCase, "-run ^("+strings.Join(parts, "|")+")$"); err != nil {
+			return triggerJobRuntime{}, err
+		}
+	}
+	if err := set(bindings.BuildTags, strings.Join(tags, ",")); err != nil {
+		return triggerJobRuntime{}, err
+	}
+
+	runtime := triggerJobRuntime{Project: lookupJobQaseProject(mapping, job), Parameters: params}
+	runtime.Folder, _ = config["folder"].(string)
+	runtime.Name, _ = config["job_name"].(string)
+	if runtime.Name == "" {
+		runtime.Name = job
+	}
+	if setup != nil {
+		group, err := findSetupEnvironment(*setup, job)
+		if err != nil {
+			return triggerJobRuntime{}, err
+		}
+		runtime.Environment = group.Name
+		if len(group.Artifacts) == 0 {
+			return triggerJobRuntime{}, fmt.Errorf("environment group %q has no artifacts", group.Name)
+		}
+		artifact := group.Artifacts[0]
+		if bindings.CattleConfig != "" {
+			content, err := os.ReadFile(group.CattleConfigPath)
+			if err != nil {
+				return triggerJobRuntime{}, fmt.Errorf("reading cattle config for %q: %w", group.Name, err)
+			}
+			if err := set(bindings.CattleConfig, string(content)); err != nil {
+				return triggerJobRuntime{}, err
+			}
+		} else if bindings.EnvironmentURL != "" {
+			if err := set(bindings.EnvironmentURL, artifact.URL); err != nil {
+				return triggerJobRuntime{}, err
+			}
+			if err := set(bindings.EnvironmentSHA256, artifact.SHA256); err != nil {
+				return triggerJobRuntime{}, err
+			}
+		} else {
+			return triggerJobRuntime{}, fmt.Errorf("job %q has no cattle config or environment URL binding", job)
+		}
+	}
+	return runtime, nil
+}
+
+func resolveJobBindings(config map[string]any, declared map[string]any) types.JobBindings {
+	var b types.JobBindings
+	if raw, ok := config["bindings"].(map[string]any); ok {
+		b.QaseRunID, _ = raw["qase_run_id"].(string)
+		b.TestPackage, _ = raw["test_package"].(string)
+		b.TestCase, _ = raw["test_case"].(string)
+		b.BuildTags, _ = raw["build_tags"].(string)
+		b.Timeout, _ = raw["timeout"].(string)
+		b.CattleConfig, _ = raw["cattle_config"].(string)
+		b.EnvironmentURL, _ = raw["environment_url"].(string)
+		b.EnvironmentSHA256, _ = raw["environment_sha256"].(string)
+	}
+	pick := func(current *string, names ...string) {
+		if *current != "" {
+			return
+		}
+		for _, name := range names {
+			if _, ok := declared[name]; ok {
+				*current = name
+				return
+			}
+		}
+	}
+	pick(&b.QaseRunID, "QASE_TEST_RUN_ID", "QASE_RUN_ID")
+	pick(&b.TestPackage, "TEST_PACKAGE", "GO_TEST_PACKAGE")
+	pick(&b.TestCase, "GOTEST_TESTCASE", "GO_TEST_CASE", "TEST_CASE")
+	pick(&b.BuildTags, "TAGS", "GO_TAGS", "VALIDATION_TEST_TAGS")
+	pick(&b.Timeout, "TIMEOUT", "GO_TIMEOUT", "TEST_TIMEOUT")
+	pick(&b.CattleConfig, "CONFIG", "CATTLE_TEST_CONFIG")
+	pick(&b.EnvironmentURL, "AGENTIC_ENV_BUNDLE_URL")
+	pick(&b.EnvironmentSHA256, "AGENTIC_ENV_BUNDLE_SHA256")
+	return b
+}
+
+func selectorsForJob(job string, identified types.IdentifiedTests, mapping map[string]any) ([]string, []string, []string) {
+	fileSet, fnSet, tagSet := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
+	tagToJob, _ := mapping["tag_to_job"].(map[string]any)
+	matched := false
+	for _, test := range identified.Tests {
+		belongs := false
+		for _, tag := range test.BuildTags {
+			if mapped, _ := tagToJob[tag].(string); mapped == job {
+				belongs = true
+				break
+			}
+		}
+		if !belongs {
+			continue
+		}
+		matched = true
+		addTestSelectors(test, fileSet, fnSet, tagSet)
+	}
+	if !matched {
+		for _, test := range identified.Tests {
+			addTestSelectors(test, fileSet, fnSet, tagSet)
+		}
+	}
+	return sortedKeysString(fileSet), sortedKeysString(fnSet), sortedKeysString(tagSet)
+}
+
+func addTestSelectors(test types.TestEntry, fileSet, fnSet, tagSet map[string]struct{}) {
+	fileSet[filepath.Dir(test.File)] = struct{}{}
+	for _, fn := range test.Functions {
+		fnSet[fn] = struct{}{}
+	}
+	for _, tag := range test.BuildTags {
+		tagSet[tag] = struct{}{}
+	}
+}
+
+func sortedKeysString(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for value := range set {
+		out = append(out, value)
+	}
+	sort.Strings(out)
+	return out
+}
+
 var triggerCmd = &cobra.Command{
 	Use:   "trigger",
 	Short: "Trigger Jenkins test jobs",
@@ -209,6 +383,21 @@ var triggerCmd = &cobra.Command{
 		jobsToTrigger := resolveTriggerJobs(identified, triggerMapping)
 		if len(jobsToTrigger) == 0 {
 			return fmt.Errorf("no mapped Jenkins jobs found from identified tests: recommended_jobs=%v recommended_tags=%v", identified.RecommendedJobs, identified.RecommendedTags)
+		}
+		var setup *types.SetupEnvironments
+		if triggerSetupEnvs != "" {
+			setup = &types.SetupEnvironments{}
+			if err := loadJSON(triggerSetupEnvs, setup); err != nil {
+				return fmt.Errorf("loading setup environments: %w", err)
+			}
+		}
+		runtimes := map[string]triggerJobRuntime{}
+		for _, job := range jobsToTrigger {
+			runtime, err := buildTriggerRuntime(job, identified, triggerMapping, setup, triggerTestTimeout)
+			if err != nil {
+				return err
+			}
+			runtimes[job] = runtime
 		}
 
 		runMap := map[string]int{}
@@ -271,46 +460,32 @@ var triggerCmd = &cobra.Command{
 			jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
 
 			for _, job := range jobsToTrigger {
-				params := map[string]string{
-					jenkinsParamTimeout: triggerTestTimeout,
-				}
-				if effectivePRNumber > 0 {
-					params[jenkinsParamPRNumber] = fmt.Sprintf("%d", effectivePRNumber)
-				}
-				jobProject := lookupJobQaseProject(triggerMapping, job)
+				runtime := runtimes[job]
+				params := runtime.Parameters
+				jobProject := runtime.Project
 				if runID, ok := runMap[jobProject]; ok {
-					params[jenkinsParamQaseRunID] = fmt.Sprintf("%d", runID)
-				} else if len(runMap) > 0 {
-					// Job's declared project has no run; use the first available run.
-					for _, id := range runMap {
-						params[jenkinsParamQaseRunID] = fmt.Sprintf("%d", id)
-						break
+					bindings := resolveJobBindings(mustJobConfig(triggerMapping, job), mustParameters(triggerMapping, job))
+					if bindings.QaseRunID == "" {
+						return fmt.Errorf("job %q has no Qase run binding", job)
 					}
+					params[bindings.QaseRunID] = fmt.Sprintf("%d", runID)
+				} else {
+					return fmt.Errorf("job %q project %q has no Qase run", job, jobProject)
 				}
 
-				jobConfig, _ := lookupJobConfig(triggerMapping, job)
-				folder, _ := jobConfig["folder"].(string)
-				jobName, _ := jobConfig["job_name"].(string)
-				if jobName == "" {
-					jobName = job
-				}
-
-				logrus.Infof("Triggering Jenkins job %s/%s", folder, jobName)
-				queueID, err := jClient.TriggerBuild(ctx, folder, jobName, params)
+				logrus.Infof("Triggering Jenkins job %s/%s", runtime.Folder, runtime.Name)
+				queueID, err := jClient.TriggerBuild(ctx, runtime.Folder, runtime.Name, params)
 				if err != nil {
-					logrus.Errorf("Failed to trigger %s/%s: %v", folder, jobName, err)
+					logrus.Errorf("Failed to trigger %s/%s: %v", runtime.Folder, runtime.Name, err)
 					triggeredJobs = append(triggeredJobs, types.TriggeredJob{
-						JobName: job,
-						Status:  jobStatusTriggerFailed,
+						JobName: job, Folder: runtime.Folder, JenkinsJobName: runtime.Name, EnvironmentGroup: runtime.Environment, Parameters: params, Status: jobStatusTriggerFailed,
 					})
 					continue
 				}
 
 				triggeredJobs = append(triggeredJobs, types.TriggeredJob{
-					JobName:    job,
-					QueueID:    &queueID,
-					Parameters: params,
-					Status:     jobStatusQueued,
+					JobName: job, Folder: runtime.Folder, JenkinsJobName: runtime.Name, EnvironmentGroup: runtime.Environment,
+					QueueID: &queueID, Parameters: params, Status: jobStatusQueued,
 				})
 			}
 		} else if localTest {
@@ -353,8 +528,27 @@ var triggerCmd = &cobra.Command{
 		if err := saveJSON(triggerOutputFile, result); err != nil {
 			return fmt.Errorf("writing output: %w", err)
 		}
+		queued := 0
+		for _, job := range triggeredJobs {
+			if job.Status == jobStatusQueued || job.Status == jobStatusDryRun || job.Status == jobStatusLocalTest {
+				queued++
+			}
+		}
+		if len(triggeredJobs) > 0 && queued == 0 {
+			return fmt.Errorf("all %d Jenkins job triggers failed; details written to %s", len(triggeredJobs), triggerOutputFile)
+		}
 
-		logrus.Infof("Triggered %d jobs → %s", len(triggeredJobs), triggerOutputFile)
+		logrus.Infof("Triggered %d of %d jobs → %s", queued, len(triggeredJobs), triggerOutputFile)
 		return nil
 	},
+}
+
+func mustJobConfig(mapping map[string]any, job string) map[string]any {
+	config, _ := lookupJobConfig(mapping, job)
+	return config
+}
+
+func mustParameters(mapping map[string]any, job string) map[string]any {
+	params, _ := mustJobConfig(mapping, job)["parameters"].(map[string]any)
+	return params
 }

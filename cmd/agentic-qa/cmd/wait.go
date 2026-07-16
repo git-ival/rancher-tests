@@ -124,7 +124,10 @@ var waitCmd = &cobra.Command{
 			time.Sleep(pollDuration)
 
 			for idx, job := range pending {
-				folder, jobName := splitJobName(job.JobName)
+				folder, jobName := job.Folder, job.JenkinsJobName
+				if jobName == "" {
+					folder, jobName = splitJobName(job.JobName)
+				}
 
 				status, err := jClient.GetBuildStatus(ctx, folder, jobName, *job.BuildNumber)
 				if err != nil {

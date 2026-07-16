@@ -238,8 +238,32 @@ func parseJobEntry(data interface{}, yamlSource string) (string, *types.JobMappi
 	if reporter, ok := job.Parameters["QASE_REPORTER_SCRIPT"]; ok {
 		job.QaseReporter = reporter.Default
 	}
+	job.Bindings = inferJobBindings(job.Parameters)
+	job.Capabilities.AcceptsInlineCattleConfig = job.Bindings.CattleConfig != ""
+	job.Capabilities.AcceptsEnvironmentURL = job.Bindings.EnvironmentURL != ""
 
 	return name, job
+}
+
+func inferJobBindings(parameters map[string]types.JobParameter) types.JobBindings {
+	pick := func(names ...string) string {
+		for _, name := range names {
+			if _, ok := parameters[name]; ok {
+				return name
+			}
+		}
+		return ""
+	}
+	return types.JobBindings{
+		QaseRunID:         pick("QASE_TEST_RUN_ID", "QASE_RUN_ID"),
+		TestPackage:       pick("TEST_PACKAGE", "GO_TEST_PACKAGE"),
+		TestCase:          pick("GOTEST_TESTCASE", "GO_TEST_CASE", "TEST_CASE"),
+		BuildTags:         pick("TAGS", "GO_TAGS", "VALIDATION_TEST_TAGS"),
+		Timeout:           pick("TIMEOUT", "GO_TIMEOUT", "TEST_TIMEOUT"),
+		CattleConfig:      pick("CONFIG", "CATTLE_TEST_CONFIG"),
+		EnvironmentURL:    pick("AGENTIC_ENV_BUNDLE_URL"),
+		EnvironmentSHA256: pick("AGENTIC_ENV_BUNDLE_SHA256"),
+	}
 }
 
 // parseDefaultsEntry extracts relevant fields from a defaults block.
@@ -331,8 +355,11 @@ func filterQAJobs(allJobs map[string]*types.JobMapping) map[string]types.JobMapp
 	for name, job := range allJobs {
 		// Keep jobs that run Go tests or declare applicable tags.
 		_, hasTestCase := job.Parameters["GOTEST_TESTCASE"]
+		_, hasGoTestCase := job.Parameters["GO_TEST_CASE"]
+		_, hasTFPTestCase := job.Parameters["TEST_CASE"]
 		_, hasTestPkg := job.Parameters["TEST_PACKAGE"]
-		if hasTestCase || hasTestPkg || len(job.ApplicableTags) > 0 {
+		_, hasGoTestPkg := job.Parameters["GO_TEST_PACKAGE"]
+		if hasTestCase || hasGoTestCase || hasTFPTestCase || hasTestPkg || hasGoTestPkg || len(job.ApplicableTags) > 0 {
 			filtered[name] = *job
 		}
 	}
