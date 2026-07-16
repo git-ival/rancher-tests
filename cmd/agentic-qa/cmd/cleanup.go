@@ -3,10 +3,12 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 
+	"github.com/rancher/tests/internal/agenticqa/artifacts"
 	ghclient "github.com/rancher/tests/internal/agenticqa/github"
 	"github.com/rancher/tests/internal/agenticqa/qase"
 	"github.com/rancher/tests/internal/agenticqa/state"
@@ -51,6 +53,31 @@ var cleanupCmd = &cobra.Command{
 		qaseClient := qase.NewClient(qaseToken)
 
 		result := types.CleanupResult{}
+		if runConfig != nil {
+			var remaining []state.ArtifactState
+			for _, artifact := range pipelineState.Artifacts {
+				if dryRun {
+					remaining = append(remaining, artifact)
+					continue
+				}
+				ref := types.ArtifactRef{Backend: artifact.Backend, URI: artifact.URI, Bucket: artifact.Bucket, Key: artifact.Key}
+				if artifact.Backend == "local" {
+					ref.LocalPath = strings.TrimPrefix(artifact.URI, "file://")
+				}
+				if err := artifacts.Delete(ctx, runConfig.Artifacts, ref); err != nil && !os.IsNotExist(err) {
+					result.Errors = append(result.Errors, fmt.Sprintf("artifact %s: %v", artifact.URI, err))
+					remaining = append(remaining, artifact)
+				}
+			}
+			if !dryRun {
+				if err := tracker.Update(func(s *state.PipelineState) error {
+					s.Artifacts = remaining
+					return nil
+				}); err != nil {
+					result.Errors = append(result.Errors, fmt.Sprintf("updating artifact state: %v", err))
+				}
+			}
+		}
 
 		// Delete Qase runs
 		for _, run := range pipelineState.QaseRuns {

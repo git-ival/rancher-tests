@@ -35,19 +35,21 @@ var (
 )
 
 const (
-	genFeatureMapCommandName   = "generate-feature-map"
-	genTriggerMapCommandName   = "generate-trigger-map"
-	genPipelineEnvCommandName  = "generate-pipeline-env"
-	identifyCommandName        = "identify"
-	planEnvironmentCommandName = "plan-environment"
-	triggerCommandName         = "trigger"
-	waitCommandName            = "wait"
-	analyzeCommandName         = "analyze"
-	defectsCommandName         = "defects"
-	configFailuresCommandName  = "config-failures"
-	cleanupCommandName         = "cleanup"
-	validateCommandName        = "validate"
-	completionCommandName      = "completion"
+	genFeatureMapCommandName    = "generate-feature-map"
+	genTriggerMapCommandName    = "generate-trigger-map"
+	genPipelineEnvCommandName   = "generate-pipeline-env"
+	identifyCommandName         = "identify"
+	planEnvironmentCommandName  = "plan-environment"
+	setupEnvironmentCommandName = "setup-env"
+	triggerCommandName          = "trigger"
+	waitCommandName             = "wait"
+	analyzeCommandName          = "analyze"
+	defectsCommandName          = "defects"
+	configFailuresCommandName   = "config-failures"
+	cleanupCommandName          = "cleanup"
+	validateCommandName         = "validate"
+	runCommandName              = "run"
+	completionCommandName       = "completion"
 
 	providerFlag       = "provider"
 	vertexProjectFlag  = "vertex-project"
@@ -104,10 +106,6 @@ const (
 	jobStatusDryRun        = "dry_run"
 	jobStatusLocalTest     = "local_test"
 	jobStatusQueued        = "queued"
-
-	jenkinsParamTimeout   = "TIMEOUT"
-	jenkinsParamPRNumber  = "PR_NUMBER"
-	jenkinsParamQaseRunID = "QASE_RUN_ID"
 )
 
 // localTestPrefix is prepended to all artifact titles/names when --local-test is set.
@@ -141,18 +139,20 @@ var rootCmd = &cobra.Command{
 	Use:   "agentic-qa",
 	Short: "Agentic QA pipeline CLI for Rancher test automation",
 	Long: `agentic-qa orchestrates the full QA pipeline:
+	0. run - Run or resume all configured stages
 	1. generate-feature-map - Generate a feature map from test case metadata
 	2. generate-trigger-map - Generate a Jenkins trigger mapping from test case metadata
 	3. generate-pipeline-env - Generate a pipeline_env.json template with organization-specific defaults
 	4. identify  - Identify tests relevant to a PR
-  5. plan-environment - Determine the minimum viable test environment for the identified tests
-  6. trigger   - Trigger Jenkins test jobs
-  7. wait      - Wait for test completion
-  8. analyze   - Triage test failures
-  9. defects   - Handle defects (issues, PRs)
-  10. config-failures - Handle configuration failures
-  11. cleanup   - Clean up pipeline-created resources
-  12. validate  - Validate credential connectivity`,
+	5. plan-environment - Determine the minimum viable test environment for the identified tests
+	6. setup-env - Publish generated environment inputs
+	7. trigger   - Trigger Jenkins test jobs
+	8. wait      - Wait for test completion
+	9. analyze   - Triage test failures
+	10. defects   - Handle defects (issues, PRs)
+	11. config-failures - Handle configuration failures
+	12. cleanup   - Clean up pipeline-created resources
+	13. validate  - Validate credential connectivity`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if configFile != "" {
 			cfg, err := runconfig.Load(configFile)
@@ -177,7 +177,7 @@ var rootCmd = &cobra.Command{
 		}
 
 		switch cmd.Name() {
-		case genFeatureMapCommandName, genTriggerMapCommandName, genPipelineEnvCommandName, validateCommandName, completionCommandName, "help":
+		case genFeatureMapCommandName, genTriggerMapCommandName, genPipelineEnvCommandName, setupEnvironmentCommandName, triggerCommandName, waitCommandName, cleanupCommandName, validateCommandName, completionCommandName, "help":
 			return nil
 		case planEnvironmentCommandName:
 			// Static-only planning does not need LLM credentials.
@@ -303,8 +303,10 @@ func applyRunConfig(cmd *cobra.Command, cfg *runconfig.Config) error {
 				return err
 			}
 		}
+	case setupEnvironmentCommandName:
+		values = map[string]string{setupEnvPlanFlag: out.EnvironmentPlan, setupEnvOutputFlag: out.SetupEnvironments}
 	case triggerCommandName:
-		values = map[string]string{repoFlag: cfg.Source.Repo, identifiedTestsFlag: out.IdentifiedTests, triggerMappingFlag: in.TriggerMapping, outputFileFlag: out.TriggeredJobs, triggerTestTimeoutFlag: cfg.Execution.TestTimeout, jenkinsURLFlag: cfg.Jenkins.URL}
+		values = map[string]string{repoFlag: cfg.Source.Repo, identifiedTestsFlag: out.IdentifiedTests, triggerMappingFlag: in.TriggerMapping, "setup-environments": out.SetupEnvironments, outputFileFlag: out.TriggeredJobs, triggerTestTimeoutFlag: cfg.Execution.TestTimeout, jenkinsURLFlag: cfg.Jenkins.URL}
 		if cfg.Source.PR != 0 {
 			pr := cfg.Source.PR
 			if err := setInt(prNumberFlag, &pr); err != nil {
