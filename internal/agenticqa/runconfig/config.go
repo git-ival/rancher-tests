@@ -56,18 +56,21 @@ type EnvironmentConfig struct {
 }
 
 type ExecutionConfig struct {
-	TestTimeout string `yaml:"testTimeout"`
-	MaxReruns   *int   `yaml:"maxReruns"`
-	DryRun      bool   `yaml:"dryRun"`
-	LocalTest   bool   `yaml:"localTest"`
+	TestTimeout     string `yaml:"testTimeout"`
+	MaxReruns       *int   `yaml:"maxReruns"`
+	DryRun          bool   `yaml:"dryRun"`
+	LocalTest       bool   `yaml:"localTest"`
+	CleanupAfterRun bool   `yaml:"cleanupAfterRun"`
 }
 
 type ArtifactConfig struct {
-	Backend string `yaml:"backend"`
-	Bucket  string `yaml:"bucket"`
-	Prefix  string `yaml:"prefix"`
-	Region  string `yaml:"region"`
-	URLTTL  string `yaml:"urlTTL"`
+	Backend        string `yaml:"backend"`
+	Bucket         string `yaml:"bucket"`
+	Prefix         string `yaml:"prefix"`
+	Region         string `yaml:"region"`
+	URLTTL         string `yaml:"urlTTL"`
+	Endpoint       string `yaml:"endpoint"`
+	ForcePathStyle bool   `yaml:"forcePathStyle"`
 }
 
 type PathsConfig struct {
@@ -97,6 +100,7 @@ type OutputPaths struct {
 	IdentifiedTests      string `yaml:"identifiedTests"`
 	EnvironmentPlan      string `yaml:"environmentPlan"`
 	EnvironmentArtifacts string `yaml:"environmentArtifacts"`
+	SetupEnvironments    string `yaml:"setupEnvironments"`
 	TriggeredJobs        string `yaml:"triggeredJobs"`
 	CompletedJobs        string `yaml:"completedJobs"`
 	TriageResults        string `yaml:"triageResults"`
@@ -129,7 +133,26 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("resolving run config path: %w", err)
 	}
 	cfg.resolvePaths(filepath.Dir(abs))
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return &cfg, nil
+}
+
+// Validate checks cross-field workflow requirements.
+func (c *Config) Validate() error {
+	if c.Paths.Outputs.State == "" {
+		return fmt.Errorf("paths.outputs.state is required")
+	}
+	if c.Artifacts.Backend == "s3" {
+		if c.Artifacts.Bucket == "" {
+			return fmt.Errorf("artifacts.bucket is required for s3")
+		}
+		if c.Artifacts.URLTTL == "" {
+			return fmt.Errorf("artifacts.urlTTL is required for s3")
+		}
+	}
+	return nil
 }
 
 func (c *Config) resolvePaths(base string) {
@@ -159,6 +182,7 @@ func (c *Config) resolvePaths(base string) {
 	p.Outputs.IdentifiedTests = resolve(p.Outputs.IdentifiedTests)
 	p.Outputs.EnvironmentPlan = resolve(p.Outputs.EnvironmentPlan)
 	p.Outputs.EnvironmentArtifacts = resolve(p.Outputs.EnvironmentArtifacts)
+	p.Outputs.SetupEnvironments = resolve(p.Outputs.SetupEnvironments)
 	p.Outputs.TriggeredJobs = resolve(p.Outputs.TriggeredJobs)
 	p.Outputs.CompletedJobs = resolve(p.Outputs.CompletedJobs)
 	p.Outputs.TriageResults = resolve(p.Outputs.TriageResults)

@@ -35,3 +35,14 @@ func TestLoadRejectsUnknownFields(t *testing.T) {
 		t.Fatal("Load accepted an unknown field")
 	}
 }
+
+func TestLoadRequiresS3Bucket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agentic-qa.yaml")
+	data := []byte("version: v1\nartifacts:\n  backend: s3\n  urlTTL: 1h\npaths:\n  outputs:\n    state: state.json\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("Load accepted s3 without a bucket")
+	}
+}

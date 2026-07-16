@@ -10,10 +10,41 @@ import (
 
 // PipelineState tracks all resources created by the pipeline for cleanup.
 type PipelineState struct {
-	QaseRuns     []QaseRunRef     `json:"qase_runs"`
-	QaseDefects  []QaseDefectRef  `json:"qase_defects"`
-	GithubIssues []GithubIssueRef `json:"github_issues"`
-	GithubPRs    []GithubPRRef    `json:"github_prs"`
+	Version      string                `json:"version,omitempty"`
+	Run          RunState              `json:"run,omitempty"`
+	Stages       map[string]StageState `json:"stages,omitempty"`
+	Artifacts    []ArtifactState       `json:"artifacts,omitempty"`
+	Environments []EnvironmentState    `json:"environments,omitempty"`
+	QaseRuns     []QaseRunRef          `json:"qase_runs"`
+	QaseDefects  []QaseDefectRef       `json:"qase_defects"`
+	GithubIssues []GithubIssueRef      `json:"github_issues"`
+	GithubPRs    []GithubPRRef         `json:"github_prs"`
+}
+
+type RunState struct {
+	ID   string `json:"id,omitempty"`
+	Repo string `json:"repo,omitempty"`
+	PR   int    `json:"pr,omitempty"`
+}
+
+type StageState struct {
+	Status    string `json:"status"`
+	UpdatedAt string `json:"updated_at"`
+	Error     string `json:"error,omitempty"`
+}
+
+type ArtifactState struct {
+	Backend string `json:"backend"`
+	URI     string `json:"uri"`
+	Bucket  string `json:"bucket,omitempty"`
+	Key     string `json:"key,omitempty"`
+}
+
+type EnvironmentState struct {
+	Name        string   `json:"name"`
+	JenkinsJobs []string `json:"jenkins_jobs,omitempty"`
+	ArtifactURI string   `json:"artifact_uri,omitempty"`
+	SHA256      string   `json:"sha256,omitempty"`
 }
 
 // QaseRunRef identifies a Qase test run.
@@ -74,6 +105,21 @@ func (t *Tracker) Save(s *PipelineState) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	return t.saveUnsafe(s)
+}
+
+// Update atomically loads, changes, and saves state.
+func (t *Tracker) Update(fn func(*PipelineState) error) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	s, err := t.loadUnsafe()
+	if err != nil {
+		return err
+	}
+	if err := fn(s); err != nil {
+		return err
+	}
 	return t.saveUnsafe(s)
 }
 

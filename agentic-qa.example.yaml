@@ -1,0 +1,73 @@
+version: v1
+
+source:
+  repo: rancher/rancher
+  pr: 0
+
+llm:
+  provider: vertex-ai
+  vertexProject: ""
+  vertexLocation: global
+  sonnetModel: claude-sonnet-4-6-20250514
+  haikuModel: claude-haiku-3-5-20241022
+
+qase:
+  project: ""
+  mcpUrl: ""
+
+jenkins:
+  url: ""
+  user: ""
+
+environment:
+  sizingProfile: minimal
+  staticOnly: false
+  recommendSpecs: true
+  resolveVersions: true
+  includePrereleases: false
+
+execution:
+  testTimeout: 3h
+  maxReruns: 2
+  dryRun: false
+  localTest: false
+  cleanupAfterRun: false
+
+artifacts:
+  backend: local
+  bucket: ""
+  prefix: agentic-qa/runs
+  region: ""
+  urlTTL: 6h
+  endpoint: ""
+  forcePathStyle: false
+
+paths:
+  workspace: ./agentic-qa
+  inputs:
+    pipelineEnv: ./config/pipeline_env.json
+    featureMapping: ./config/feature_test_mapping.json
+    triggerMapping: ./config/jenkins_trigger_mapping.json
+    triageFramework: ./config/triage_framework.json
+    additionalContext: ./config/additional_context.txt
+    testRepoRoot: .
+    chartsDir: ""
+    jjbDir: ""
+    validationDir: ./validation
+    actionsDir: ./actions
+  outputs:
+    state: ./agentic-qa/pipeline_state.json
+    pipelineEnv: ./agentic-qa/pipeline_env.json
+    featureMapping: ./agentic-qa/feature_test_mapping.json
+    triggerMapping: ./agentic-qa/jenkins_trigger_mapping.json
+    identifiedTests: ./agentic-qa/identified_tests.json
+    environmentPlan: ./agentic-qa/environment_plan.json
+    environmentArtifacts: ./agentic-qa/environment
+    setupEnvironments: ./agentic-qa/setup_environments.json
+    triggeredJobs: ./agentic-qa/triggered_jobs.json
+    completedJobs: ./agentic-qa/completed_jobs.json
+    triageResults: ./agentic-qa/triage_results.json
+    defectActions: ./agentic-qa/defect_actions.json
+    configActions: ./agentic-qa/config_actions.json
+    cleanupResult: ./agentic-qa/cleanup_result.json
+    summary: ./agentic-qa/pipeline_summary.json

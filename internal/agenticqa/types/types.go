@@ -67,12 +67,15 @@ type TriggeredJobs struct {
 
 // TriggeredJob describes a single Jenkins job that was triggered.
 type TriggeredJob struct {
-	JobName     string            `json:"job_name"`
-	BuildNumber *int              `json:"build_number"`
-	QueueID     *int              `json:"queue_id"`
-	Parameters  map[string]string `json:"parameters,omitempty"`
-	Status      string            `json:"status"`
-	TestFile    string            `json:"test_file,omitempty"`
+	JobName          string            `json:"job_name"`
+	Folder           string            `json:"folder,omitempty"`
+	JenkinsJobName   string            `json:"jenkins_job_name,omitempty"`
+	EnvironmentGroup string            `json:"environment_group,omitempty"`
+	BuildNumber      *int              `json:"build_number"`
+	QueueID          *int              `json:"queue_id"`
+	Parameters       map[string]string `json:"parameters,omitempty"`
+	Status           string            `json:"status"`
+	TestFile         string            `json:"test_file,omitempty"`
 }
 
 // CompletedJobs is the output of the "wait" step.
@@ -419,6 +422,25 @@ type JobMapping struct {
 	QaseReporter   string                  `json:"qase_reporter"`
 	ApplicableTags []string                `json:"applicable_tags"`
 	Parameters     map[string]JobParameter `json:"parameters"`
+	Bindings       JobBindings             `json:"bindings,omitempty"`
+	Capabilities   JobCapabilities         `json:"capabilities,omitempty"`
+}
+
+// JobBindings maps workflow values to exact Jenkins parameter names.
+type JobBindings struct {
+	QaseRunID         string `json:"qase_run_id,omitempty"`
+	TestPackage       string `json:"test_package,omitempty"`
+	TestCase          string `json:"test_case,omitempty"`
+	BuildTags         string `json:"build_tags,omitempty"`
+	Timeout           string `json:"timeout,omitempty"`
+	CattleConfig      string `json:"cattle_config,omitempty"`
+	EnvironmentURL    string `json:"environment_url,omitempty"`
+	EnvironmentSHA256 string `json:"environment_sha256,omitempty"`
+}
+
+type JobCapabilities struct {
+	AcceptsInlineCattleConfig bool `json:"accepts_inline_cattle_config,omitempty"`
+	AcceptsEnvironmentURL     bool `json:"accepts_environment_url,omitempty"`
 }
 
 // JobParameter describes a single parameter of a Jenkins job.
@@ -426,6 +448,31 @@ type JobParameter struct {
 	Type            string `json:"type"`
 	Default         string `json:"default"`
 	RequiredForQase bool   `json:"required_for_qase,omitempty"`
+}
+
+// ArtifactRef identifies a published environment artifact.
+type ArtifactRef struct {
+	Backend   string `json:"backend"`
+	LocalPath string `json:"local_path,omitempty"`
+	URI       string `json:"uri"`
+	URL       string `json:"url,omitempty"`
+	Bucket    string `json:"bucket,omitempty"`
+	Key       string `json:"key,omitempty"`
+	SHA256    string `json:"sha256"`
+	Size      int64  `json:"size"`
+}
+
+type SetupEnvironments struct {
+	Groups     []SetupEnvironment `json:"groups"`
+	PreparedAt string             `json:"prepared_at"`
+}
+
+type SetupEnvironment struct {
+	Name             string        `json:"name"`
+	JenkinsJobs      []string      `json:"jenkins_jobs"`
+	TestFiles        []string      `json:"test_files,omitempty"`
+	CattleConfigPath string        `json:"cattle_config_path"`
+	Artifacts        []ArtifactRef `json:"artifacts"`
 }
 
 // QaseProjectInfo describes a Qase project referenced in the trigger mapping.
