@@ -65,3 +65,32 @@ func TestValidateAuthWithEncodedBasicCredential(t *testing.T) {
 		t.Fatalf("ValidateAuth: %v", err)
 	}
 }
+
+func TestUpdateBuildSetsDisplayNameAndDescription(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/crumbIssuer/api/json":
+			w.WriteHeader(http.StatusNotFound)
+		case "/job/folder/job/job/7/configSubmit":
+			if err := r.ParseForm(); err != nil {
+				t.Fatal(err)
+			}
+			var payload map[string]string
+			if err := json.Unmarshal([]byte(r.Form.Get("json")), &payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["displayName"] != "Agentic QA PR #42" || payload["description"] != "Agentic QA run" {
+				t.Fatalf("payload = %#v", payload)
+			}
+			w.WriteHeader(http.StatusOK)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	client := NewClient(server.URL, "user", "token")
+	if err := client.UpdateBuild(context.Background(), "folder", "job", 7, "Agentic QA PR #42", "Agentic QA run"); err != nil {
+		t.Fatalf("UpdateBuild: %v", err)
+	}
+}

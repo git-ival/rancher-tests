@@ -363,3 +363,32 @@ func (c *Client) GetBuildStatus(ctx context.Context, folder, jobName string, bui
 	logrus.Debugf("jenkins: %s/%s#%d result=%s duration=%dms", folder, jobName, buildNumber, status.Result, status.DurationMS)
 	return status, nil
 }
+
+// UpdateBuild labels a Jenkins build for Agentic QA tracking.
+func (c *Client) UpdateBuild(ctx context.Context, folder, jobName string, buildNumber int, displayName, description string) error {
+	buildURL := fmt.Sprintf("%s/job/%s/job/%s/%d/configSubmit", c.baseURL, folder, jobName, buildNumber)
+	payload, err := json.Marshal(map[string]string{"displayName": displayName, "description": description})
+	if err != nil {
+		return fmt.Errorf("encoding build metadata: %w", err)
+	}
+	form := url.Values{"json": []string{string(payload)}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, buildURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("building metadata request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	c.setAuth(req)
+	if c.crumbField != "" {
+		req.Header.Set(c.crumbField, c.crumbValue)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("updating build metadata: %w", err)
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode < 200 || resp.StatusCode >= 400 {
+		return fmt.Errorf("updating build metadata returned status %d", resp.StatusCode)
+	}
+	return nil
+}

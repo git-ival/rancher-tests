@@ -18,6 +18,7 @@ import (
 const (
 	waitTriggeredJobsFlag = "triggered-jobs"
 	waitPollIntervalFlag  = "poll-interval"
+	waitQueuePollInterval = 5 * time.Second
 )
 
 var (
@@ -87,18 +88,8 @@ var waitCmd = &cobra.Command{
 		jenkinsUser := activeJenkinsUser()
 		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 		jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
-
-		for i := range triggered.Jobs {
-			job := &triggered.Jobs[i]
-			if job.QueueID != nil && job.BuildNumber == nil {
-				logrus.Infof("Resolving build number for %s (queue %d)", job.JobName, *job.QueueID)
-				buildNum, err := jClient.GetQueueBuildNumber(ctx, *job.QueueID)
-				if err != nil {
-					logrus.Warnf("Could not resolve build number for %s: %v", job.JobName, err)
-				} else {
-					job.BuildNumber = &buildNum
-				}
-			}
+		if waitPollInterval <= 0 {
+			return fmt.Errorf("--%s must be positive", waitPollIntervalFlag)
 		}
 
 		var completed []types.CompletedJob
@@ -107,9 +98,9 @@ var waitCmd = &cobra.Command{
 
 		for i := range triggered.Jobs {
 			job := &triggered.Jobs[i]
-			if job.BuildNumber != nil && !isTerminalStatus(job.Status) {
+			if (job.QueueID != nil || job.BuildNumber != nil) && !isTerminalStatus(job.Status) {
 				pending[i] = job
-			} else if job.Status == jobStatusTriggerFailed || job.Status == jobStatusDryRun {
+			} else if isTerminalStatus(job.Status) {
 				completed = append(completed, types.CompletedJob{
 					JobName: job.JobName,
 					Status:  job.Status,
@@ -120,13 +111,27 @@ var waitCmd = &cobra.Command{
 		pollDuration := time.Duration(waitPollInterval) * time.Second
 
 		for len(pending) > 0 {
-			logrus.Infof("Waiting for %d jobs... (poll interval: %s)", len(pending), pollDuration)
-			time.Sleep(pollDuration)
-
 			for idx, job := range pending {
 				folder, jobName := job.Folder, job.JenkinsJobName
 				if jobName == "" {
 					folder, jobName = splitJobName(job.JobName)
+				}
+				if job.BuildNumber == nil {
+					logrus.Infof("Resolving build number for %s (queue %d)", job.JobName, *job.QueueID)
+					buildNum, err := jClient.GetQueueBuildNumber(ctx, *job.QueueID)
+					if err != nil {
+						logrus.Warnf("Build for %s is still queued: %v", job.JobName, err)
+						continue
+					}
+					job.BuildNumber = &buildNum
+					if err := saveJSON(waitTriggeredJobs, triggered); err != nil {
+						return fmt.Errorf("checkpointing build number for %s: %w", job.JobName, err)
+					}
+					if err := jClient.UpdateBuild(ctx, folder, jobName, buildNum, job.DisplayName, job.Description); err != nil {
+						logrus.Warnf("Could not label %s #%d: %v", job.JobName, buildNum, err)
+					} else {
+						logrus.Infof("Labelled %s #%d as %q", job.JobName, buildNum, job.DisplayName)
+					}
 				}
 
 				status, err := jClient.GetBuildStatus(ctx, folder, jobName, *job.BuildNumber)
@@ -153,6 +158,15 @@ var waitCmd = &cobra.Command{
 
 					logrus.Infof("Job %s #%d finished: %s (%.1f min)",
 						job.JobName, *job.BuildNumber, status.Result, cj.DurationMinutes)
+				}
+			}
+			if len(pending) > 0 {
+				nextPoll := pendingPollDuration(pending, pollDuration)
+				logrus.Infof("Waiting for %d jobs... (poll interval: %s)", len(pending), nextPoll)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(nextPoll):
 				}
 			}
 		}
@@ -189,9 +203,21 @@ var waitCmd = &cobra.Command{
 	},
 }
 
+func pendingPollDuration(pending map[int]*types.TriggeredJob, buildPoll time.Duration) time.Duration {
+	for _, job := range pending {
+		if job.BuildNumber == nil {
+			if buildPoll < waitQueuePollInterval {
+				return buildPoll
+			}
+			return waitQueuePollInterval
+		}
+	}
+	return buildPoll
+}
+
 func isTerminalStatus(s string) bool {
 	switch s {
-	case jobStatusSuccess, jobStatusFailure, jobStatusUnstable, jobStatusAborted, jobStatusTriggerFailed, jobStatusDryRun:
+	case jobStatusSuccess, jobStatusFailure, jobStatusUnstable, jobStatusAborted, jobStatusTriggerFailed, jobStatusDryRun, jobStatusLocalTest:
 		return true
 	}
 	return false
