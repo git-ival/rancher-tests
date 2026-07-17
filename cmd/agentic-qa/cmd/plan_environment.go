@@ -295,7 +295,7 @@ memorySize/diskSize).`,
 			for i := range plan.Groups {
 				g := &plan.Groups[i]
 				resolveGroupCharts(ctx, g, resolver, llmClient, env.ProjectDisplayName)
-				g.Cluster = envplan.ComputeSpecsWithCharts(g.Cluster, g.Workloads, g.Charts)
+				g.Cluster = envplan.ComputeSpecsWithChartsForPolicy(g.Cluster, g.Workloads, g.Charts, profile.Downstream)
 			}
 		}
 

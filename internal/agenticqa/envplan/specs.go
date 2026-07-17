@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/rancher/tests/internal/agenticqa/envconfig"
 	"github.com/rancher/tests/internal/agenticqa/types"
 )
 
@@ -77,8 +78,22 @@ func ComputeSpecs(cluster types.ClusterRequirement, workloads []types.WorkloadRe
 // term. Unresolved charts contribute a conservative default footprint so an
 // undetected-footprint chart still bumps sizing.
 func ComputeSpecsWithCharts(cluster types.ClusterRequirement, workloads []types.WorkloadRequirement, charts []types.ChartRequirement) types.ClusterRequirement {
+	return computeSpecsWithScaleOut(cluster, workloads, charts, envconfig.SizingTargetSpec{})
+}
+
+// ComputeSpecsWithChartsForPolicy scales worker count first, then divides
+// aggregate pressure across those nodes.
+func ComputeSpecsWithChartsForPolicy(cluster types.ClusterRequirement, workloads []types.WorkloadRequirement, charts []types.ChartRequirement, policy envconfig.SizingTargetSpec) types.ClusterRequirement {
+	return computeSpecsWithScaleOut(cluster, workloads, charts, policy)
+}
+
+func computeSpecsWithScaleOut(cluster types.ClusterRequirement, workloads []types.WorkloadRequirement, charts []types.ChartRequirement, policy envconfig.SizingTargetSpec) types.ClusterRequirement {
 	weight := workloadPressure(workloads)
 	chartVCPUs, chartMemGiB, chartDiskGiB, chartNames := chartPressure(charts)
+	workerIndex, workers := scaleOutWorkers(&cluster, weight, chartVCPUs, chartMemGiB, chartDiskGiB, policy)
+	if workers < 1 {
+		workers = 1
+	}
 
 	for i := range cluster.NodePools {
 		p := &cluster.NodePools[i]
@@ -87,14 +102,18 @@ func ComputeSpecsWithCharts(cluster types.ClusterRequirement, workloads []types.
 		// Workload pressure and chart footprints only affect pools that
 		// schedule workloads (worker or all-roles); dedicated etcd/controlplane
 		// pools are not scaled by them.
-		if p.Worker {
-			spec.VCPUs += weight / cpuPerNWorkloads
-			spec.MemoryGiB += weight * perWorkloadMemGiB
-			spec.DiskGiB += weight * perWorkloadDiskGiB
+		if p.Worker && (workerIndex < 0 || i == workerIndex) {
+			poolWorkers := p.Quantity
+			if poolWorkers < 1 {
+				poolWorkers = workers
+			}
+			spec.VCPUs += ceilDiv(weight, poolWorkers*cpuPerNWorkloads)
+			spec.MemoryGiB += ceilDiv(weight*perWorkloadMemGiB, poolWorkers)
+			spec.DiskGiB += ceilDiv(weight*perWorkloadDiskGiB, poolWorkers)
 
-			spec.VCPUs += chartVCPUs
-			spec.MemoryGiB += chartMemGiB
-			spec.DiskGiB += chartDiskGiB
+			spec.VCPUs += ceilDiv(chartVCPUs, poolWorkers)
+			spec.MemoryGiB += ceilDiv(chartMemGiB, poolWorkers)
+			spec.DiskGiB += ceilDiv(chartDiskGiB, poolWorkers)
 		}
 
 		clampSpec(&spec)
@@ -102,7 +121,45 @@ func ComputeSpecsWithCharts(cluster types.ClusterRequirement, workloads []types.
 		spec.Rationale = rationaleForFull(*p, weight, chartNames, chartVCPUs, chartMemGiB)
 		p.Spec = &spec
 	}
+	cluster.TotalNodes = totalNodes(cluster.NodePools)
 	return cluster
+}
+
+func scaleOutWorkers(cluster *types.ClusterRequirement, weight, chartVCPUs, chartMemGiB, chartDiskGiB int, policy envconfig.SizingTargetSpec) (int, int) {
+	required := 1
+	apply := func(pressure, target int) {
+		if pressure > 0 && target > 0 {
+			required = maxInt(required, ceilDiv(pressure, target))
+		}
+	}
+	apply(weight, policy.WorkloadUnitsPerNode)
+	apply(chartVCPUs, policy.ChartVCPUsPerNode)
+	apply(chartMemGiB, policy.ChartMemoryGiBPerNode)
+	apply(chartDiskGiB, policy.ChartDiskGiBPerNode)
+
+	workerIndex := -1
+	for i, p := range cluster.NodePools {
+		if p.Worker && !(p.Etcd || p.ControlPlane) {
+			workerIndex = i
+			break
+		}
+	}
+	if workerIndex < 0 {
+		for i, p := range cluster.NodePools {
+			if p.Worker {
+				workerIndex = i
+				break
+			}
+		}
+	}
+	if workerIndex < 0 {
+		return -1, 0
+	}
+	p := &cluster.NodePools[workerIndex]
+	if p.Quantity < required {
+		p.Quantity = required
+	}
+	return workerIndex, p.Quantity
 }
 
 // Chart footprint sizing constants.

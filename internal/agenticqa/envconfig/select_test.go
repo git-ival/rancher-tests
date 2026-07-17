@@ -78,8 +78,24 @@ func TestPerformanceProfileDefined(t *testing.T) {
 	if got := prof.Downstream.PreferredFamilies; len(got) == 0 || got[0] != "m5" {
 		t.Errorf("performance downstream should prefer m5 first, got %v", got)
 	}
-	if prof.Downstream.MaxNodeVCPUs != 16 {
-		t.Errorf("performance should allow 16 vCPU nodes, got %d", prof.Downstream.MaxNodeVCPUs)
+	if prof.Downstream.MaxNodeVCPUs != 8 {
+		t.Errorf("performance should cap nodes at 8 vCPU, got %d", prof.Downstream.MaxNodeVCPUs)
+	}
+	if prof.Downstream.MinWorker != 3 || prof.Downstream.WorkloadUnitsPerNode == 0 {
+		t.Errorf("performance should prefer worker scale-out, got %+v", prof.Downstream)
+	}
+}
+
+func TestDefaultProfilesDefineScaleOutTargets(t *testing.T) {
+	sp := GenerateSizingPolicy()
+	for _, name := range []string{"minimal", "balanced", "ha", "performance"} {
+		prof, _, ok := sp.ResolveProfile(name)
+		if !ok {
+			t.Fatalf("%s profile missing", name)
+		}
+		if prof.Downstream.WorkloadUnitsPerNode == 0 || prof.Downstream.ChartMemoryGiBPerNode == 0 {
+			t.Errorf("%s profile lacks scale-out targets: %+v", name, prof.Downstream)
+		}
 	}
 }
 

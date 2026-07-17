@@ -194,6 +194,12 @@ type SizingTargetSpec struct {
 	MaxNodeVCPUs     int `json:"max_node_vcpus,omitempty"`
 	MaxNodeMemoryGiB int `json:"max_node_memory_gib,omitempty"`
 	MaxNodeDiskGiB   int `json:"max_node_disk_gib,omitempty"`
+	// Scale-out targets bound aggregate workload pressure per worker node.
+	// Lower values prefer more nodes over larger nodes.
+	WorkloadUnitsPerNode  int `json:"workload_units_per_node,omitempty"`
+	ChartVCPUsPerNode     int `json:"chart_vcpus_per_node,omitempty"`
+	ChartMemoryGiBPerNode int `json:"chart_memory_gib_per_node,omitempty"`
+	ChartDiskGiBPerNode   int `json:"chart_disk_gib_per_node,omitempty"`
 	// PreferredFamilies is an ordered list of instance-family prefixes the
 	// instance-type selector should prefer for this target (e.g. ["t3a","t3"]
 	// for cost-conscious profiles, ["m5","c5","r5"] for "performance"). The
@@ -586,14 +592,18 @@ func (s SizingPolicyConfig) validate() error {
 // validate ensures a target spec has no negative values.
 func (t SizingTargetSpec) validate() error {
 	for field, v := range map[string]int{
-		"min_etcd":            t.MinEtcd,
-		"min_controlplane":    t.MinControlPlane,
-		"min_worker":          t.MinWorker,
-		"min_all_roles":       t.MinAllRoles,
-		"max_total_nodes":     t.MaxTotalNodes,
-		"max_node_vcpus":      t.MaxNodeVCPUs,
-		"max_node_memory_gib": t.MaxNodeMemoryGiB,
-		"max_node_disk_gib":   t.MaxNodeDiskGiB,
+		"min_etcd":                  t.MinEtcd,
+		"min_controlplane":          t.MinControlPlane,
+		"min_worker":                t.MinWorker,
+		"min_all_roles":             t.MinAllRoles,
+		"max_total_nodes":           t.MaxTotalNodes,
+		"max_node_vcpus":            t.MaxNodeVCPUs,
+		"max_node_memory_gib":       t.MaxNodeMemoryGiB,
+		"max_node_disk_gib":         t.MaxNodeDiskGiB,
+		"workload_units_per_node":   t.WorkloadUnitsPerNode,
+		"chart_vcpus_per_node":      t.ChartVCPUsPerNode,
+		"chart_memory_gib_per_node": t.ChartMemoryGiBPerNode,
+		"chart_disk_gib_per_node":   t.ChartDiskGiBPerNode,
 	} {
 		if v < 0 {
 			return fmt.Errorf("%s must not be negative", field)
@@ -720,13 +730,21 @@ func generateSizingPolicy() SizingPolicyConfig {
 		DefaultProfile: types.SizingProfileMinimal,
 		Profiles: map[string]SizingProfile{
 			types.SizingProfileMinimal: {
-				// No floors/caps — minimum viable as derived. Cheapest families.
-				Upstream:   SizingTargetSpec{PreferredFamilies: types.CostConsciousFamilies},
-				Downstream: SizingTargetSpec{PreferredFamilies: types.CostConsciousFamilies},
+				// Keep nodes modest and spread deployed workloads across workers.
+				Upstream: SizingTargetSpec{PreferredFamilies: types.CostConsciousFamilies},
+				Downstream: SizingTargetSpec{
+					PreferredFamilies: types.CostConsciousFamilies,
+					MaxNodeVCPUs:      4, MaxNodeMemoryGiB: 16, MaxNodeDiskGiB: 80,
+					WorkloadUnitsPerNode: 4, ChartVCPUsPerNode: 2, ChartMemoryGiBPerNode: 4, ChartDiskGiBPerNode: 20,
+				},
 			},
 			types.SizingProfileBalanced: {
-				Upstream:   SizingTargetSpec{MinAllRoles: 1, PreferredFamilies: types.CostConsciousFamilies},
-				Downstream: SizingTargetSpec{MinAllRoles: 1, MinWorker: 1, PreferredFamilies: types.CostConsciousFamilies},
+				Upstream: SizingTargetSpec{MinAllRoles: 1, PreferredFamilies: types.CostConsciousFamilies},
+				Downstream: SizingTargetSpec{
+					MinAllRoles: 1, MinWorker: 2, PreferredFamilies: types.CostConsciousFamilies,
+					MaxNodeVCPUs: 4, MaxNodeMemoryGiB: 16, MaxNodeDiskGiB: 80,
+					WorkloadUnitsPerNode: 3, ChartVCPUsPerNode: 2, ChartMemoryGiBPerNode: 4, ChartDiskGiBPerNode: 20,
+				},
 			},
 			types.SizingProfileHA: {
 				Upstream: SizingTargetSpec{
@@ -741,24 +759,26 @@ func generateSizingPolicy() SizingPolicyConfig {
 					MinAllRoles:       3,
 					EnforceOddEtcd:    true,
 					PreferredFamilies: types.CostConsciousFamilies,
+					MaxNodeVCPUs:      4, MaxNodeMemoryGiB: 16, MaxNodeDiskGiB: 80,
+					WorkloadUnitsPerNode: 4, ChartVCPUsPerNode: 2, ChartMemoryGiBPerNode: 4, ChartDiskGiBPerNode: 20,
 				},
 			},
 			types.SizingProfilePerformance: {
-				// High-load suites: prefer non-burstable performance families and
-				// allow larger per-node sizes. Modest worker floor so perf suites
-				// aren't single-worker. HA-style etcd is left to the ha profile.
+				// High-load suites use more non-burstable workers before larger nodes.
 				Upstream: SizingTargetSpec{
 					MinAllRoles:       1,
 					PreferredFamilies: types.PerformanceFamilies,
-					MaxNodeVCPUs:      16,
-					MaxNodeMemoryGiB:  64,
+					MaxNodeVCPUs:      8,
+					MaxNodeMemoryGiB:  32,
 				},
 				Downstream: SizingTargetSpec{
-					MinAllRoles:       1,
-					MinWorker:         2,
-					PreferredFamilies: types.PerformanceFamilies,
-					MaxNodeVCPUs:      16,
-					MaxNodeMemoryGiB:  64,
+					MinAllRoles:          1,
+					MinWorker:            3,
+					PreferredFamilies:    types.PerformanceFamilies,
+					MaxNodeVCPUs:         8,
+					MaxNodeMemoryGiB:     32,
+					MaxNodeDiskGiB:       100,
+					WorkloadUnitsPerNode: 3, ChartVCPUsPerNode: 4, ChartMemoryGiBPerNode: 8, ChartDiskGiBPerNode: 30,
 				},
 			},
 		},

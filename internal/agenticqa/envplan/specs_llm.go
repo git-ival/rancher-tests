@@ -29,6 +29,8 @@ heuristic baseline machine spec (vCPUs, memory in GiB, disk in GiB), plus the
 list of workloads the tests deploy.
 
 Refine each pool's spec to the MINIMUM size that will reliably run the tests:
+- Prefer the existing node quantity over larger per-node resources. Workload
+  and chart pressure has already been spread across the worker nodes.
 - Never go below the heuristic baseline for a pool unless it is clearly
   oversized; prefer to keep or modestly increase it.
 - Increase memory for control-plane/etcd pools if many CRDs/controllers or

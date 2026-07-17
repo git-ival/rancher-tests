@@ -51,6 +51,46 @@ func TestComputeSpecs_WorkloadPressureScalesWorkers(t *testing.T) {
 	}
 }
 
+func TestComputeSpecsForPolicyScalesOutWorkers(t *testing.T) {
+	profile, _, _ := envconfig.GenerateSizingPolicy().ResolveProfile(types.SizingProfileBalanced)
+	workloads := []types.WorkloadRequirement{
+		{Kind: types.WorkloadStatefulSet},
+		{Kind: types.WorkloadStatefulSet},
+		{Kind: types.WorkloadDaemonSet},
+		{Kind: types.WorkloadDeployment},
+	}
+	cluster := types.ClusterRequirement{NodePools: []types.NodeRequirement{{Worker: true, Quantity: 1}}}
+	out := ComputeSpecsWithChartsForPolicy(cluster, workloads, nil, profile.Downstream)
+
+	if out.NodePools[0].Quantity != 3 {
+		t.Fatalf("worker quantity = %d, want 3", out.NodePools[0].Quantity)
+	}
+	spec := out.NodePools[0].Spec
+	if spec.MemoryGiB >= baseWorkerMemGiB+workloadPressure(workloads) {
+		t.Fatalf("workload pressure was not spread across nodes: %+v", spec)
+	}
+}
+
+func TestComputeSpecsForPolicyPrefersDedicatedWorkers(t *testing.T) {
+	profile, _, _ := envconfig.GenerateSizingPolicy().ResolveProfile(types.SizingProfileBalanced)
+	charts := []types.ChartRequirement{{Name: "monitoring", Footprint: &types.ChartFootprint{CPUMillis: 6000, MemoryMiB: 12288, DiskGiB: 30}}}
+	cluster := types.ClusterRequirement{NodePools: []types.NodeRequirement{
+		{Etcd: true, ControlPlane: true, Worker: true, Quantity: 1},
+		{Worker: true, Quantity: 1},
+	}}
+	out := ComputeSpecsWithChartsForPolicy(cluster, nil, charts, profile.Downstream)
+
+	if out.NodePools[0].Quantity != 1 {
+		t.Fatalf("all-roles quantity = %d, want 1", out.NodePools[0].Quantity)
+	}
+	if out.NodePools[1].Quantity <= 1 {
+		t.Fatalf("dedicated worker pool did not scale out: %+v", out.NodePools[1])
+	}
+	if out.NodePools[0].Spec.VCPUs != baseAllRolesVCPUs {
+		t.Fatalf("chart pressure applied to all-roles pool despite dedicated workers: %+v", out.NodePools[0].Spec)
+	}
+}
+
 func TestComputeSpecs_ControlPlaneNotScaledByWorkloads(t *testing.T) {
 	pools := []types.NodeRequirement{{Etcd: true, ControlPlane: true, Quantity: 1}}
 	a := ComputeSpecs(types.ClusterRequirement{NodePools: clone(pools)}, nil)
