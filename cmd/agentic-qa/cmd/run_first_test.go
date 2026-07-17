@@ -74,7 +74,7 @@ func TestExecuteWorkflowStagePropagatesContext(t *testing.T) {
 		return saveJSON(output, map[string]bool{"ok": true})
 	}
 
-	if err := executeWorkflowStage(ctx, tracker, workflowStage{name: "child", command: child, output: output}); err != nil {
+	if _, err := executeWorkflowStage(ctx, tracker, workflowStage{name: "child", command: child, output: output}, false); err != nil {
 		t.Fatalf("executeWorkflowStage: %v", err)
 	}
 }

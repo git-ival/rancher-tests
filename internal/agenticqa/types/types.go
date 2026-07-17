@@ -55,6 +55,7 @@ type TriggeredQaseRun struct {
 
 // TriggeredJobs is the output of the "trigger" step.
 type TriggeredJobs struct {
+	PayloadVersion string `json:"payload_version,omitempty"`
 	// QaseRuns holds one entry per Qase project that received a run.
 	QaseRuns []TriggeredQaseRun `json:"qase_runs"`
 	// QaseRunID and QaseProject retain the first run for backward compat
@@ -416,6 +417,7 @@ type JenkinsTriggerMapping struct {
 
 // JobMapping describes a single Jenkins job and its configuration.
 type JobMapping struct {
+	Defaults       string                  `json:"-"`
 	Description    string                  `json:"description"`
 	YAMLSource     string                  `json:"yaml_source"`
 	Jenkinsfile    string                  `json:"jenkinsfile"`
@@ -443,6 +445,7 @@ type JobBindings struct {
 type JobCapabilities struct {
 	AcceptsInlineCattleConfig bool `json:"accepts_inline_cattle_config,omitempty"`
 	AcceptsEnvironmentURL     bool `json:"accepts_environment_url,omitempty"`
+	ProvisionsEnvironment     bool `json:"provisions_environment,omitempty"`
 }
 
 // JobParameter describes a single parameter of a Jenkins job.

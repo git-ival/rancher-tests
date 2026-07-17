@@ -96,7 +96,7 @@ func runGenerateTriggerMap() error {
 		Metadata: types.MappingMetadata{
 			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
 			GeneratedBy: "agentic-qa " + genTriggerMapCommandName,
-			Version:     mappingFileVersion,
+			Version:     triggerMappingFileVersion,
 		},
 		JobMappings:          filteredJobs,
 		TagToJob:             tagToJob,
@@ -208,7 +208,7 @@ func parseJobEntry(data interface{}, yamlSource string) (string, *types.JobMappi
 	}
 
 	if defName := getString(m, "defaults"); defName != "" {
-		job.Folder = "" // placeholder
+		job.Defaults = defName
 	}
 
 	if folder := getString(m, "folder"); folder != "" {
@@ -241,6 +241,9 @@ func parseJobEntry(data interface{}, yamlSource string) (string, *types.JobMappi
 	job.Bindings = inferJobBindings(job.Parameters)
 	job.Capabilities.AcceptsInlineCattleConfig = job.Bindings.CattleConfig != ""
 	job.Capabilities.AcceptsEnvironmentURL = job.Bindings.EnvironmentURL != ""
+	_, hasTerraform := job.Parameters["TERRAFORM_CONFIG"]
+	_, hasAnsible := job.Parameters["ANSIBLE_VARIABLES"]
+	job.Capabilities.ProvisionsEnvironment = hasTerraform && hasAnsible
 
 	return name, job
 }
@@ -329,17 +332,15 @@ func parseParameter(p interface{}) (string, types.JobParameter) {
 
 // resolveJobDefaults fills in missing fields from the referenced defaults.
 func resolveJobDefaults(job *types.JobMapping, allDefaults map[string]*jjbDefaults) {
-	for defName, def := range allDefaults {
-		if job.Folder == "" && def.Folder != "" {
-			if strings.Contains(defName, "individual") && strings.Contains(defName, "updated") {
-				if job.Folder == "" {
-					job.Folder = def.Folder
-				}
-			}
-		}
-		if job.Jenkinsfile == "" && def.Jenkinsfile != "" {
-			job.Jenkinsfile = def.Jenkinsfile
-		}
+	def := allDefaults[job.Defaults]
+	if def == nil {
+		return
+	}
+	if job.Folder == "" {
+		job.Folder = def.Folder
+	}
+	if job.Jenkinsfile == "" {
+		job.Jenkinsfile = def.Jenkinsfile
 	}
 }
 

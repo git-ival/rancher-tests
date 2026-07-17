@@ -18,6 +18,15 @@ qase:
 jenkins:
   url: ""
   user: ""
+  environmentJob: go-pit-daily-job-updated
+
+tests:
+  repoUrl: https://github.com/rancher/tests
+  branch: main
+
+qaInfra:
+  repoUrl: https://github.com/rancher/qa-infra-automation
+  branch: main
 
 environment:
   sizingProfile: minimal

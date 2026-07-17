@@ -68,10 +68,13 @@ var runCmd = &cobra.Command{
 		if runConfig.Execution.CleanupAfterRun {
 			stages = append(stages, workflowStage{name: cleanupCommandName, command: cleanupCmd, output: runConfig.Paths.Outputs.CleanupResult})
 		}
+		force := false
 		for _, stage := range stages {
-			if err := executeWorkflowStage(cmd.Context(), tracker, stage); err != nil {
+			executed, err := executeWorkflowStage(cmd.Context(), tracker, stage, force)
+			if err != nil {
 				return err
 			}
+			force = force || executed
 		}
 		return saveJSON(runConfig.Paths.Outputs.Summary, map[string]any{
 			"repo": runConfig.Source.Repo, "pr": runConfig.Source.PR,
@@ -123,6 +126,21 @@ func prepareRunInputs(ctx context.Context) error {
 		if os.Getenv(jenkinsTokenEnvVar) == "" {
 			problems = append(problems, jenkinsTokenEnvVar+" is not set")
 		}
+		if runConfig.Jenkins.EnvironmentJob == "" {
+			problems = append(problems, "jenkins.environmentJob is required")
+		}
+		if runConfig.Tests.RepoURL == "" {
+			problems = append(problems, "tests.repoUrl is required")
+		}
+		if runConfig.Tests.Branch == "" {
+			problems = append(problems, "tests.branch is required")
+		}
+		if runConfig.QAInfra.RepoURL == "" {
+			problems = append(problems, "qaInfra.repoUrl is required")
+		}
+		if runConfig.QAInfra.Branch == "" {
+			problems = append(problems, "qaInfra.branch is required")
+		}
 	}
 	switch provider {
 	case llmProviderVertexAI:
@@ -145,7 +163,7 @@ func prepareRunInputs(ctx context.Context) error {
 	if !isFile(runConfig.Paths.Inputs.FeatureMapping) && isFile(runConfig.Paths.Outputs.FeatureMapping) {
 		runConfig.Paths.Inputs.FeatureMapping = runConfig.Paths.Outputs.FeatureMapping
 	}
-	if !isFile(runConfig.Paths.Inputs.TriggerMapping) && isFile(runConfig.Paths.Outputs.TriggerMapping) {
+	if !validTriggerMapping(runConfig.Paths.Inputs.TriggerMapping) && validTriggerMapping(runConfig.Paths.Outputs.TriggerMapping) {
 		runConfig.Paths.Inputs.TriggerMapping = runConfig.Paths.Outputs.TriggerMapping
 	}
 	if !isFile(runConfig.Paths.Inputs.FeatureMapping) {
@@ -159,7 +177,7 @@ func prepareRunInputs(ctx context.Context) error {
 			problems = append(problems, "feature mapping is missing and paths.outputs.featureMapping is empty")
 		}
 	}
-	if !isFile(runConfig.Paths.Inputs.TriggerMapping) {
+	if !validTriggerMapping(runConfig.Paths.Inputs.TriggerMapping) {
 		if !isDir(runConfig.Paths.Inputs.JJBDir) {
 			problems = append(problems, fmt.Sprintf("trigger mapping is missing and paths.inputs.jjbDir is not a directory: %s", runConfig.Paths.Inputs.JJBDir))
 		}
@@ -181,7 +199,7 @@ func prepareRunInputs(ctx context.Context) error {
 		}
 		runConfig.Paths.Inputs.FeatureMapping = runConfig.Paths.Outputs.FeatureMapping
 	}
-	if !isFile(runConfig.Paths.Inputs.TriggerMapping) {
+	if !validTriggerMapping(runConfig.Paths.Inputs.TriggerMapping) {
 		logrus.Infof("Trigger mapping not found; generating %s", runConfig.Paths.Outputs.TriggerMapping)
 		genTriggerMapJJBDir = runConfig.Paths.Inputs.JJBDir
 		genTriggerMapOutputFile = runConfig.Paths.Outputs.TriggerMapping
@@ -191,6 +209,11 @@ func prepareRunInputs(ctx context.Context) error {
 		runConfig.Paths.Inputs.TriggerMapping = runConfig.Paths.Outputs.TriggerMapping
 	}
 	return nil
+}
+
+func validTriggerMapping(path string) bool {
+	var mapping types.JenkinsTriggerMapping
+	return loadJSON(path, &mapping) == nil && mapping.Metadata.Version == triggerMappingFileVersion
 }
 
 func runPreflightProblems() []string {
@@ -240,36 +263,42 @@ type workflowStage struct {
 	output  string
 }
 
-func executeWorkflowStage(ctx context.Context, tracker *state.Tracker, stage workflowStage) error {
+func executeWorkflowStage(ctx context.Context, tracker *state.Tracker, stage workflowStage, force bool) (bool, error) {
 	s, err := tracker.Load()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if current, ok := s.Stages[stage.name]; ok && current.Status == stageSucceeded && validStageOutput(stage.name, stage.output) {
-		return nil
+	if !force {
+		if current, ok := s.Stages[stage.name]; ok && current.Status == stageSucceeded && validStageOutput(stage.name, stage.output) {
+			return false, nil
+		}
 	}
 	if err := applyRunConfig(stage.command, runConfig); err != nil {
-		return err
+		return false, err
 	}
 	if err := markStage(tracker, stage.name, stageRunning, ""); err != nil {
-		return err
+		return false, err
 	}
 	stage.command.SetContext(ctx)
 	if err := stage.command.RunE(stage.command, nil); err != nil {
 		_ = markStage(tracker, stage.name, stageFailed, err.Error())
-		return fmt.Errorf("%s: %w", stage.name, err)
+		return true, fmt.Errorf("%s: %w", stage.name, err)
 	}
 	if !validJSONFile(stage.output) {
 		err := fmt.Errorf("%s did not produce valid JSON at %s", stage.name, stage.output)
 		_ = markStage(tracker, stage.name, stageFailed, err.Error())
-		return err
+		return true, err
 	}
-	return markStage(tracker, stage.name, stageSucceeded, "")
+	return true, markStage(tracker, stage.name, stageSucceeded, "")
 }
 
 func validStageOutput(stage, path string) bool {
 	if !validJSONFile(path) {
 		return false
+	}
+	if stage == triggerCommandName {
+		var triggered types.TriggeredJobs
+		return loadJSON(path, &triggered) == nil && triggered.PayloadVersion == triggerPayloadVersion
 	}
 	if stage != waitCommandName || runConfig == nil {
 		return true

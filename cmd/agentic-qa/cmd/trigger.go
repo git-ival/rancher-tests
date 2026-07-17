@@ -252,17 +252,13 @@ func buildTriggerRuntime(job string, identified types.IdentifiedTests, mapping m
 	}
 
 	files, functions, tags := selectorsForJob(job, identified, mapping)
-	if len(files) == 1 {
-		if err := set(bindings.TestPackage, "./"+filepath.ToSlash(files[0])+"/..."); err != nil {
+	if bindings.TestPackage != "" && len(files) > 0 {
+		if err := set(bindings.TestPackage, testPackageSelector(bindings.TestPackage, files)); err != nil {
 			return triggerJobRuntime{}, err
 		}
 	}
 	if len(functions) > 0 {
-		parts := make([]string, len(functions))
-		for i, fn := range functions {
-			parts[i] = regexp.QuoteMeta(fn)
-		}
-		if err := set(bindings.TestCase, "-run ^("+strings.Join(parts, "|")+")$"); err != nil {
+		if err := set(bindings.TestCase, shellSafeRunSelector(functions)); err != nil {
 			return triggerJobRuntime{}, err
 		}
 	}
@@ -310,6 +306,110 @@ func buildTriggerRuntime(job string, identified types.IdentifiedTests, mapping m
 		}
 	}
 	return runtime, nil
+}
+
+func buildEnvironmentJobRuntime(job string, identified types.IdentifiedTests, mapping map[string]any, setup *types.SetupEnvironments, timeout string) (triggerJobRuntime, error) {
+	config, ok := lookupJobConfig(mapping, job)
+	if !ok {
+		return triggerJobRuntime{}, fmt.Errorf("environment job %q is missing from trigger mapping", job)
+	}
+	declared, _ := config["parameters"].(map[string]any)
+	required := []string{"TERRAFORM_CONFIG", "ANSIBLE_VARIABLES", "CATTLE_TEST_CONFIG", "TEST_PACKAGE", "GOTEST_TESTCASE_VALIDATION", "VALIDATION_TEST_TAGS", "TEST_TIMEOUT", "INDIVIDUAL_JOB", "HOSTNAME_PREFIX"}
+	for _, parameter := range required {
+		if _, ok := declared[parameter]; !ok {
+			return triggerJobRuntime{}, fmt.Errorf("environment job %q does not declare %s", job, parameter)
+		}
+	}
+	params := map[string]string{}
+	for name := range declared {
+		if value := jobParameterDefault(declared, name); value != "" {
+			params[name] = value
+		}
+	}
+	_, functions, tags := selectorsForJob(job, identified, mapping)
+	if len(functions) > 0 {
+		params["GOTEST_TESTCASE_VALIDATION"] = shellSafeRunSelector(functions)
+	}
+	params["TEST_PACKAGE"] = "./validation/..."
+	params["VALIDATION_TEST_TAGS"] = strings.Join(tags, ",")
+	params["PROVISIONING_TAGS"] = ""
+	params["TEST_TIMEOUT"] = timeout
+	params["HOSTNAME_PREFIX"] = fmt.Sprintf("agentic-%d-%d", identified.PRNumber, time.Now().UTC().Unix())
+	if runConfig != nil {
+		if runConfig.Tests.RepoURL != "" {
+			params["TESTS_REPO_URL"] = runConfig.Tests.RepoURL
+		}
+		if runConfig.Tests.Branch != "" {
+			params["TESTS_BRANCH"] = runConfig.Tests.Branch
+		}
+		if runConfig.QAInfra.RepoURL != "" {
+			params["QA_INFRA_REPO_URL"] = runConfig.QAInfra.RepoURL
+		}
+		if runConfig.QAInfra.Branch != "" {
+			if _, ok := declared["QA_INFRA_BRANCH"]; ok {
+				params["QA_INFRA_BRANCH"] = runConfig.QAInfra.Branch
+			} else if _, ok := declared["QA_INFRA_REPO_BRANCH"]; ok {
+				params["QA_INFRA_REPO_BRANCH"] = runConfig.QAInfra.Branch
+			}
+		}
+	}
+	var plan types.EnvironmentPlan
+	if runConfig != nil && loadJSON(runConfig.Paths.Outputs.EnvironmentPlan, &plan) == nil && plan.VersionResolution != nil {
+		versions := plan.VersionResolution
+		if versions.RancherVersion.Value != "" {
+			params["RANCHER_VERSION"] = versions.RancherVersion.Value
+		}
+		if version, ok := versions.KubernetesVersionByDistro[types.DistroRKE2]; ok && version.Value != "" {
+			params["RKE2_VERSION"] = version.Value
+		}
+	}
+	if setup != nil && len(setup.Groups) == 1 {
+		params["CATTLE_TEST_CONFIG"] = jobParameterDefault(declared, "CATTLE_TEST_CONFIG")
+	}
+	project, err := resolveJobQaseProject(job, identified, mapping)
+	if err != nil {
+		return triggerJobRuntime{}, err
+	}
+	folder, _ := config["folder"].(string)
+	name, _ := config["job_name"].(string)
+	if name == "" {
+		name = job
+	}
+	environment := ""
+	if setup != nil && len(setup.Groups) == 1 {
+		environment = setup.Groups[0].Name
+	}
+	return triggerJobRuntime{Folder: folder, Name: name, Project: project, Environment: environment, Parameters: params}, nil
+}
+
+func shellSafeRunSelector(functions []string) string {
+	parts := make([]string, len(functions))
+	for i, fn := range functions {
+		parts[i] = regexp.QuoteMeta(fn)
+	}
+	return `-run ^\(` + strings.Join(parts, `\|`) + `\)$`
+}
+
+func jobParameterDefault(parameters map[string]any, name string) string {
+	parameter, _ := parameters[name].(map[string]any)
+	value, _ := parameter["default"].(string)
+	return value
+}
+
+func testPackageSelector(parameter string, directories []string) string {
+	if parameter == "GO_TEST_PACKAGE" {
+		if len(directories) == 1 {
+			return "./" + filepath.ToSlash(directories[0]) + "/..."
+		}
+		return "./validation/..."
+	}
+	if len(directories) == 1 {
+		dir := strings.TrimPrefix(filepath.ToSlash(directories[0]), "validation/")
+		if dir != "validation" && dir != "." && dir != "" {
+			return dir + "/..."
+		}
+	}
+	return "..."
 }
 
 func resolveJobBindings(config map[string]any, declared map[string]any) types.JobBindings {
@@ -393,9 +493,9 @@ func sortedKeysString(set map[string]struct{}) []string {
 	return out
 }
 
-func trackedQaseRuns(path string, projects []string) map[string]int {
+func trackedQaseRuns(path string, projects []string, reuse bool) map[string]int {
 	runs := map[string]int{}
-	if path == "" {
+	if path == "" || !reuse {
 		return runs
 	}
 	tracked, err := state.NewTracker(path).Load()
@@ -453,18 +553,29 @@ var triggerCmd = &cobra.Command{
 				return fmt.Errorf("loading setup environments: %w", err)
 			}
 		}
+		if setup != nil && runConfig != nil && runConfig.Jenkins.EnvironmentJob != "" {
+			jobsToTrigger = []string{runConfig.Jenkins.EnvironmentJob}
+		}
 		runtimes := map[string]triggerJobRuntime{}
 		for _, job := range jobsToTrigger {
-			runtime, err := buildTriggerRuntime(job, identified, triggerMapping, setup, triggerTestTimeout)
+			var runtime triggerJobRuntime
+			var err error
+			if runConfig != nil && job == runConfig.Jenkins.EnvironmentJob {
+				runtime, err = buildEnvironmentJobRuntime(job, identified, triggerMapping, setup, triggerTestTimeout)
+			} else {
+				runtime, err = buildTriggerRuntime(job, identified, triggerMapping, setup, triggerTestTimeout)
+			}
 			if err != nil {
 				return err
 			}
 			runtimes[job] = runtime
 		}
 
-		runMap := trackedQaseRuns(stateFile, identified.QaseProjects)
+		environmentManaged := setup != nil && runConfig != nil && runConfig.Jenkins.EnvironmentJob != ""
+		reuseRuns := !environmentManaged && (runConfig == nil || !isFile(runConfig.Paths.Outputs.CompletedJobs))
+		runMap := trackedQaseRuns(stateFile, identified.QaseProjects, reuseRuns)
 
-		if !dryRun {
+		if !dryRun && !environmentManaged {
 			baseRunName := triggerQaseRunName
 			if baseRunName == "" {
 				baseRunName = fmt.Sprintf("PR #%d - Agentic QA", effectivePRNumber)
@@ -537,7 +648,7 @@ var triggerCmd = &cobra.Command{
 						return fmt.Errorf("job %q has no Qase run binding", job)
 					}
 					params[bindings.QaseRunID] = fmt.Sprintf("%d", runID)
-				} else {
+				} else if !environmentManaged {
 					return fmt.Errorf("job %q project %q has no Qase run", job, jobProject)
 				}
 
@@ -584,9 +695,10 @@ var triggerCmd = &cobra.Command{
 		})
 
 		result := types.TriggeredJobs{
-			QaseRuns:    qaseRuns,
-			Jobs:        triggeredJobs,
-			TriggeredAt: time.Now().UTC().Format(time.RFC3339),
+			PayloadVersion: triggerPayloadVersion,
+			QaseRuns:       qaseRuns,
+			Jobs:           triggeredJobs,
+			TriggeredAt:    time.Now().UTC().Format(time.RFC3339),
 		}
 		// Preserve legacy single-run fields.
 		if len(qaseRuns) > 0 {

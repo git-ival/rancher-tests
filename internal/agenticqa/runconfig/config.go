@@ -18,6 +18,8 @@ type Config struct {
 	LLM         LLMConfig         `yaml:"llm"`
 	Qase        QaseConfig        `yaml:"qase"`
 	Jenkins     JenkinsConfig     `yaml:"jenkins"`
+	Tests       RepositoryConfig  `yaml:"tests"`
+	QAInfra     QAInfraConfig     `yaml:"qaInfra"`
 	Environment EnvironmentConfig `yaml:"environment"`
 	Execution   ExecutionConfig   `yaml:"execution"`
 	Artifacts   ArtifactConfig    `yaml:"artifacts"`
@@ -43,8 +45,19 @@ type QaseConfig struct {
 }
 
 type JenkinsConfig struct {
-	URL  string `yaml:"url"`
-	User string `yaml:"user"`
+	URL            string `yaml:"url"`
+	User           string `yaml:"user"`
+	EnvironmentJob string `yaml:"environmentJob"`
+}
+
+type RepositoryConfig struct {
+	RepoURL string `yaml:"repoUrl"`
+	Branch  string `yaml:"branch"`
+}
+
+type QAInfraConfig struct {
+	RepoURL string `yaml:"repoUrl"`
+	Branch  string `yaml:"branch"`
 }
 
 type EnvironmentConfig struct {

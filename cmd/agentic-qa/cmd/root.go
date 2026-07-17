@@ -92,7 +92,9 @@ const (
 	defaultSonnetModel = "claude-sonnet-4-6-20250514"
 	defaultHaikuModel  = "claude-haiku-3-5-20241022"
 
-	mappingFileVersion = "2.0"
+	mappingFileVersion        = "2.0"
+	triggerMappingFileVersion = "3.0"
+	triggerPayloadVersion     = "3"
 
 	// CLI defaults; PipelineEnv supplies runtime values.
 	defaultProductRepo = "rancher/rancher"

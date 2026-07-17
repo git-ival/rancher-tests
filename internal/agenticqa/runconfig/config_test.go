@@ -49,3 +49,48 @@ func TestLoadRequiresS3Bucket(t *testing.T) {
 		t.Fatal("Load accepted s3 without a bucket")
 	}
 }
+
+func TestLoadJenkinsEnvironmentJob(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agentic-qa.yaml")
+	data := []byte("version: v1\njenkins:\n  environmentJob: go-pit-daily-job-updated\npaths:\n  outputs:\n    state: state.json\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Jenkins.EnvironmentJob != "go-pit-daily-job-updated" {
+		t.Fatalf("environmentJob = %q", cfg.Jenkins.EnvironmentJob)
+	}
+}
+
+func TestLoadQAInfraConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agentic-qa.yaml")
+	data := []byte("version: v1\nqaInfra:\n  repoUrl: https://github.com/rancher/qa-infra-automation\n  branch: main\npaths:\n  outputs:\n    state: state.json\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.QAInfra.RepoURL == "" || cfg.QAInfra.Branch != "main" {
+		t.Fatalf("qaInfra = %#v", cfg.QAInfra)
+	}
+}
+
+func TestLoadTestsRepositoryConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "agentic-qa.yaml")
+	data := []byte("version: v1\ntests:\n  repoUrl: https://github.com/rancher/tests\n  branch: main\npaths:\n  outputs:\n    state: state.json\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Tests.RepoURL != "https://github.com/rancher/tests" || cfg.Tests.Branch != "main" {
+		t.Fatalf("tests = %#v", cfg.Tests)
+	}
+}
