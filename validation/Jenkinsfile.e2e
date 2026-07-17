@@ -88,7 +88,7 @@ pipeline {
         // ── Repository parameters ──────────────────────────────
         string(
             name: 'QA_JENKINS_LIBRARY_BRANCH',
-            defaultValue: 'main',
+            defaultValue: 'pull/20/head',
             description: 'Branch of qa-jenkins-library to use'
         )
         string(
@@ -525,12 +525,16 @@ insecure = true'''
         stage('Checkout') {
             steps {
                 script {
-                    def dirs = airgap.standardCheckout(
-                        testsRepo: [url: params.TESTS_REPO_URL, branch: params.TESTS_BRANCH],
-                        infraRepo: [url: params.QA_INFRA_REPO_URL, branch: params.QA_INFRA_BRANCH]
+                    def dirs = project.checkoutMultipleIsolated([
+                        [repository: params.TESTS_REPO_URL, branch: params.TESTS_BRANCH, target: 'tests'],
+                        [repository: params.QA_INFRA_REPO_URL, branch: params.QA_INFRA_BRANCH, target: 'qa-infra-automation']
                     )
-                    env.TESTS_DIR = dirs.testsDir
-                    env.INFRA_DIR = dirs.infraDir
+                    env.TESTS_DIR = dirs[0] // tests checkout directory
+                    env.INFRA_DIR = dirs[1] // qa-infra-automation checkout directory
+
+                    if (!fileExists("${env.TESTS_DIR}/validation/pipeline/Dockerfile.infra")) {
+                        error "Invalid tests checkout: ${env.TESTS_DIR}/validation/pipeline/Dockerfile.infra is missing"
+                    }
 
                     def hostnamePrefix = params.HOSTNAME_PREFIX ?: 'unknown'
                     currentBuild.displayName = "#${env.BUILD_NUMBER} - ${hostnamePrefix}"
