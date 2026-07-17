@@ -1,9 +1,13 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"strconv"
+	"time"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -27,27 +31,11 @@ var validateCmd = &cobra.Command{
 		if ghToken == "" {
 			logrus.Errorf("%s is not set", githubTokenEnvVar)
 			failures++
+		} else if err := validateGitHub(cmd.Context(), ghToken); err != nil {
+			logrus.Errorf("GitHub: %v", err)
+			failures++
 		} else {
-			req, err := http.NewRequestWithContext(cmd.Context(), http.MethodGet, "https://api.github.com/user", nil)
-			if err != nil {
-				logrus.Errorf("GitHub: failed to create request: %v", err)
-				failures++
-			} else {
-				req.Header.Set("Authorization", "Bearer "+ghToken)
-				resp, err := http.DefaultClient.Do(req)
-				if err != nil {
-					logrus.Errorf("GitHub: request failed: %v", err)
-					failures++
-				} else {
-					resp.Body.Close()
-					if resp.StatusCode == http.StatusOK {
-						logrus.Info("GitHub: OK")
-					} else {
-						logrus.Errorf("GitHub: unexpected status %d", resp.StatusCode)
-						failures++
-					}
-				}
-			}
+			logrus.Info("GitHub: OK")
 		}
 
 		qaseToken := os.Getenv(qaseApiTokenEnvVar)
@@ -159,4 +147,52 @@ var validateCmd = &cobra.Command{
 		logrus.Info("All credential checks passed")
 		return nil
 	},
+}
+
+func validateGitHub(ctx context.Context, token string) error {
+	return validateGitHubWithClient(ctx, http.DefaultClient, "https://api.github.com/user", token, time.Second)
+}
+
+func validateGitHubWithClient(ctx context.Context, client *http.Client, endpoint, token string, retryBase time.Duration) error {
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+		if err != nil {
+			return fmt.Errorf("creating request: %w", err)
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return fmt.Errorf("request failed: %w", err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		switch resp.StatusCode {
+		case http.StatusOK:
+			return nil
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return fmt.Errorf("authentication failed with status %d", resp.StatusCode)
+		}
+
+		requestID := resp.Header.Get("X-GitHub-Request-Id")
+		if resp.StatusCode < 500 || attempt == attempts {
+			return fmt.Errorf("service returned status %d (request ID %s)", resp.StatusCode, requestID)
+		}
+
+		delay := time.Duration(attempt) * retryBase
+		if retryAfter, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && retryAfter > 0 {
+			delay = time.Duration(retryAfter) * time.Second
+		}
+		logrus.Warnf("GitHub: service returned status %d (request ID %s); retrying in %s", resp.StatusCode, requestID, delay)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+		}
+	}
+	return nil
 }
