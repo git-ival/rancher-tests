@@ -93,21 +93,22 @@ type InputPaths struct {
 }
 
 type OutputPaths struct {
-	State                string `yaml:"state"`
-	PipelineEnv          string `yaml:"pipelineEnv"`
-	FeatureMapping       string `yaml:"featureMapping"`
-	TriggerMapping       string `yaml:"triggerMapping"`
-	IdentifiedTests      string `yaml:"identifiedTests"`
-	EnvironmentPlan      string `yaml:"environmentPlan"`
-	EnvironmentArtifacts string `yaml:"environmentArtifacts"`
-	SetupEnvironments    string `yaml:"setupEnvironments"`
-	TriggeredJobs        string `yaml:"triggeredJobs"`
-	CompletedJobs        string `yaml:"completedJobs"`
-	TriageResults        string `yaml:"triageResults"`
-	DefectActions        string `yaml:"defectActions"`
-	ConfigActions        string `yaml:"configActions"`
-	CleanupResult        string `yaml:"cleanupResult"`
-	Summary              string `yaml:"summary"`
+	State                 string `yaml:"state"`
+	PipelineEnv           string `yaml:"pipelineEnv"`
+	FeatureMapping        string `yaml:"featureMapping"`
+	TriggerMapping        string `yaml:"triggerMapping"`
+	IdentifiedTests       string `yaml:"identifiedTests"`
+	EnvironmentPlan       string `yaml:"environmentPlan"`
+	EnvironmentArtifacts  string `yaml:"environmentArtifacts"`
+	PublishedEnvironments string `yaml:"publishedEnvironments"`
+	SetupEnvironments     string `yaml:"setupEnvironments"`
+	TriggeredJobs         string `yaml:"triggeredJobs"`
+	CompletedJobs         string `yaml:"completedJobs"`
+	TriageResults         string `yaml:"triageResults"`
+	DefectActions         string `yaml:"defectActions"`
+	ConfigActions         string `yaml:"configActions"`
+	CleanupResult         string `yaml:"cleanupResult"`
+	Summary               string `yaml:"summary"`
 }
 
 // Load parses config and resolves paths against the config directory.
@@ -182,6 +183,7 @@ func (c *Config) resolvePaths(base string) {
 	p.Outputs.IdentifiedTests = resolve(p.Outputs.IdentifiedTests)
 	p.Outputs.EnvironmentPlan = resolve(p.Outputs.EnvironmentPlan)
 	p.Outputs.EnvironmentArtifacts = resolve(p.Outputs.EnvironmentArtifacts)
+	p.Outputs.PublishedEnvironments = resolve(p.Outputs.PublishedEnvironments)
 	p.Outputs.SetupEnvironments = resolve(p.Outputs.SetupEnvironments)
 	p.Outputs.TriggeredJobs = resolve(p.Outputs.TriggeredJobs)
 	p.Outputs.CompletedJobs = resolve(p.Outputs.CompletedJobs)

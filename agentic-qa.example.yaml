@@ -63,6 +63,7 @@ paths:
     identifiedTests: ./agentic-qa/identified_tests.json
     environmentPlan: ./agentic-qa/environment_plan.json
     environmentArtifacts: ./agentic-qa/environment
+    publishedEnvironments: ./agentic-qa/published-environments
     setupEnvironments: ./agentic-qa/setup_environments.json
     triggeredJobs: ./agentic-qa/triggered_jobs.json
     completedJobs: ./agentic-qa/completed_jobs.json

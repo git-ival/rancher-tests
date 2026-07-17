@@ -50,7 +50,7 @@ func runSetupEnv(ctx context.Context) error {
 	if err := loadJSON(setupEnvPlan, &plan); err != nil {
 		return fmt.Errorf("loading environment plan: %w", err)
 	}
-	publicationRoot := filepath.Join(runConfig.Paths.Workspace, "published")
+	publicationRoot := runConfig.Paths.Outputs.PublishedEnvironments
 	publisher, err := artifacts.New(ctx, runConfig.Artifacts, publicationRoot)
 	if err != nil {
 		return err

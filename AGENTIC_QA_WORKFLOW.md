@@ -6,6 +6,14 @@ Run the resumable workflow with:
 agentic-qa --config agentic-qa.yaml run
 ```
 
+Relative paths are resolved from the config file directory. On first run,
+missing `pipelineEnv`, `triageFramework`, `additionalContext`, and `chartsDir`
+inputs are optional. Missing feature and trigger mappings are generated from
+`validationDir` and `jjbDir`; their output paths must be configured.
+
+Preflight validates required credentials, source PR, repository directories,
+and output paths before creating Qase runs or triggering Jenkins jobs.
+
 The workflow checkpoints these stages in `pipeline_state.json`:
 
 1. `identify`
@@ -21,6 +29,7 @@ The workflow checkpoints these stages in `pipeline_state.json`:
 `setup-env` publishes each generated cattle config through the configured local
 or S3 backend. Existing Jenkins jobs receive the config as inline `CONFIG` or
 `CATTLE_TEST_CONFIG`. Jobs may instead declare URL and checksum bindings.
+Local publications are written to `paths.outputs.publishedEnvironments`.
 
 The current qa-infra integration generates upstream Terraform and Ansible input
 files but does not execute them. The reusable in-repo provisioner requires a

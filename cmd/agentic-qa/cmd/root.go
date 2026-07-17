@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -154,6 +155,7 @@ var rootCmd = &cobra.Command{
 	12. cleanup   - Clean up pipeline-created resources
 	13. validate  - Validate credential connectivity`,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		pipelineEnvExplicit := cmd.Flag(pipelineEnvFlag).Changed
 		if configFile != "" {
 			cfg, err := runconfig.Load(configFile)
 			if err != nil {
@@ -168,16 +170,21 @@ var rootCmd = &cobra.Command{
 
 		// Generator commands may run without pipeline_env.json.
 		if pipelineEnvFile != "" {
-			env, err := envconfig.Load(pipelineEnvFile)
+			env, err := loadPipelineEnv(pipelineEnvFile, pipelineEnvExplicit)
 			if err != nil {
 				return fmt.Errorf("--%s: %w", pipelineEnvFlag, err)
 			}
-			pipelineEnv = env
-			logrus.Infof("Loaded pipeline environment config from %s", pipelineEnvFile)
+			if env == nil {
+				logrus.Warnf("Pipeline environment config %s does not exist; using built-in defaults", pipelineEnvFile)
+				pipelineEnvFile = ""
+			} else {
+				pipelineEnv = env
+				logrus.Infof("Loaded pipeline environment config from %s", pipelineEnvFile)
+			}
 		}
 
 		switch cmd.Name() {
-		case genFeatureMapCommandName, genTriggerMapCommandName, genPipelineEnvCommandName, setupEnvironmentCommandName, triggerCommandName, waitCommandName, cleanupCommandName, validateCommandName, completionCommandName, "help":
+		case genFeatureMapCommandName, genTriggerMapCommandName, genPipelineEnvCommandName, setupEnvironmentCommandName, triggerCommandName, waitCommandName, cleanupCommandName, validateCommandName, runCommandName, completionCommandName, "help":
 			return nil
 		case planEnvironmentCommandName:
 			// Static-only planning does not need LLM credentials.
@@ -210,6 +217,14 @@ var rootCmd = &cobra.Command{
 	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
+}
+
+func loadPipelineEnv(path string, explicit bool) (*envconfig.PipelineEnv, error) {
+	env, err := envconfig.Load(path)
+	if err != nil && errors.Is(err, os.ErrNotExist) && !explicit {
+		return nil, nil
+	}
+	return env, err
 }
 
 func init() {

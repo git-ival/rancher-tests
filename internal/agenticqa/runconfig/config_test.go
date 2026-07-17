@@ -9,7 +9,7 @@ import (
 func TestLoadResolvesRelativePaths(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "agentic-qa.yaml")
-	data := []byte("version: v1\npaths:\n  inputs:\n    featureMapping: config/features.json\n  outputs:\n    state: work/state.json\n")
+	data := []byte("version: v1\npaths:\n  inputs:\n    featureMapping: config/features.json\n  outputs:\n    state: work/state.json\n    publishedEnvironments: work/published\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -23,6 +23,9 @@ func TestLoadResolvesRelativePaths(t *testing.T) {
 	}
 	if got, want := cfg.Paths.Outputs.State, filepath.Join(dir, "work/state.json"); got != want {
 		t.Fatalf("state = %q, want %q", got, want)
+	}
+	if got, want := cfg.Paths.Outputs.PublishedEnvironments, filepath.Join(dir, "work/published"); got != want {
+		t.Fatalf("publishedEnvironments = %q, want %q", got, want)
 	}
 }
 
