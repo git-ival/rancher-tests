@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -127,6 +128,40 @@ func lookupJobQaseProject(triggerMapping map[string]any, jobName string) string 
 	return qaseProject
 }
 
+func resolveJobQaseProject(job string, identified types.IdentifiedTests, triggerMapping map[string]any) (string, error) {
+	selected := selectedTestIndices(job, identified, triggerMapping)
+	projects := map[string]struct{}{}
+	for project, indices := range identified.TestsByProject {
+		for _, selectedIndex := range selected {
+			if slices.Contains(indices, selectedIndex) {
+				projects[project] = struct{}{}
+				break
+			}
+		}
+	}
+	if len(projects) == 0 {
+		for _, index := range selected {
+			for _, project := range identified.Tests[index].QaseProjects {
+				projects[project] = struct{}{}
+			}
+		}
+	}
+	if len(projects) == 1 {
+		for project := range projects {
+			return project, nil
+		}
+	}
+
+	configured := lookupJobQaseProject(triggerMapping, job)
+	if _, ok := projects[configured]; ok {
+		return configured, nil
+	}
+	if len(projects) == 0 && configured != "" {
+		return configured, nil
+	}
+	return "", fmt.Errorf("job %q matches tests from multiple Qase projects %v; set an explicit valid job project", job, sortedKeysString(projects))
+}
+
 // lookupJobConfig returns the mapping entry for a job from either the
 // top-level map (legacy) or the nested job_mappings section (current format).
 func lookupJobConfig(triggerMapping map[string]any, jobName string) (map[string]any, bool) {
@@ -235,7 +270,11 @@ func buildTriggerRuntime(job string, identified types.IdentifiedTests, mapping m
 		return triggerJobRuntime{}, err
 	}
 
-	runtime := triggerJobRuntime{Project: lookupJobQaseProject(mapping, job), Parameters: params}
+	project, err := resolveJobQaseProject(job, identified, mapping)
+	if err != nil {
+		return triggerJobRuntime{}, err
+	}
+	runtime := triggerJobRuntime{Project: project, Parameters: params}
 	runtime.Folder, _ = config["folder"].(string)
 	runtime.Name, _ = config["job_name"].(string)
 	if runtime.Name == "" {
@@ -309,28 +348,30 @@ func resolveJobBindings(config map[string]any, declared map[string]any) types.Jo
 
 func selectorsForJob(job string, identified types.IdentifiedTests, mapping map[string]any) ([]string, []string, []string) {
 	fileSet, fnSet, tagSet := map[string]struct{}{}, map[string]struct{}{}, map[string]struct{}{}
+	for _, index := range selectedTestIndices(job, identified, mapping) {
+		addTestSelectors(identified.Tests[index], fileSet, fnSet, tagSet)
+	}
+	return sortedKeysString(fileSet), sortedKeysString(fnSet), sortedKeysString(tagSet)
+}
+
+func selectedTestIndices(job string, identified types.IdentifiedTests, mapping map[string]any) []int {
 	tagToJob, _ := mapping["tag_to_job"].(map[string]any)
-	matched := false
-	for _, test := range identified.Tests {
-		belongs := false
+	var selected []int
+	for index, test := range identified.Tests {
 		for _, tag := range test.BuildTags {
 			if mapped, _ := tagToJob[tag].(string); mapped == job {
-				belongs = true
+				selected = append(selected, index)
 				break
 			}
 		}
-		if !belongs {
-			continue
-		}
-		matched = true
-		addTestSelectors(test, fileSet, fnSet, tagSet)
 	}
-	if !matched {
-		for _, test := range identified.Tests {
-			addTestSelectors(test, fileSet, fnSet, tagSet)
+	if len(selected) == 0 {
+		selected = make([]int, len(identified.Tests))
+		for index := range identified.Tests {
+			selected[index] = index
 		}
 	}
-	return sortedKeysString(fileSet), sortedKeysString(fnSet), sortedKeysString(tagSet)
+	return selected
 }
 
 func addTestSelectors(test types.TestEntry, fileSet, fnSet, tagSet map[string]struct{}) {
@@ -350,6 +391,27 @@ func sortedKeysString(set map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func trackedQaseRuns(path string, projects []string) map[string]int {
+	runs := map[string]int{}
+	if path == "" {
+		return runs
+	}
+	tracked, err := state.NewTracker(path).Load()
+	if err != nil {
+		return runs
+	}
+	allowed := map[string]struct{}{}
+	for _, project := range projects {
+		allowed[project] = struct{}{}
+	}
+	for _, run := range tracked.QaseRuns {
+		if _, ok := allowed[run.Project]; ok && run.RunID > runs[run.Project] {
+			runs[run.Project] = run.RunID
+		}
+	}
+	return runs
 }
 
 var triggerCmd = &cobra.Command{
@@ -400,7 +462,7 @@ var triggerCmd = &cobra.Command{
 			runtimes[job] = runtime
 		}
 
-		runMap := map[string]int{}
+		runMap := trackedQaseRuns(stateFile, identified.QaseProjects)
 
 		if !dryRun {
 			baseRunName := triggerQaseRunName
@@ -418,6 +480,10 @@ var triggerCmd = &cobra.Command{
 			}
 
 			for _, project := range projectsToRun {
+				if id := runMap[project]; id > 0 {
+					logrus.Infof("Reusing tracked Qase run %d in project %s", id, project)
+					continue
+				}
 				runName := fmt.Sprintf("%s [%s]", baseRunName, project)
 				desc := fmt.Sprintf("Automated run for %s#%d (project %s)",
 					triggerRepo, effectivePRNumber, project)
@@ -455,6 +521,8 @@ var triggerCmd = &cobra.Command{
 		jenkinsToken := os.Getenv(jenkinsTokenEnvVar)
 
 		var triggeredJobs []types.TriggeredJob
+		jobDisplayName := fmt.Sprintf("Agentic QA PR #%d", effectivePRNumber)
+		jobDescription := fmt.Sprintf("Agentic QA run for %s#%d; Qase project(s): %s", triggerRepo, effectivePRNumber, strings.Join(identified.QaseProjects, ", "))
 
 		if jenkinsURL != "" && !dryRun && !localTest {
 			jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
@@ -478,14 +546,15 @@ var triggerCmd = &cobra.Command{
 				if err != nil {
 					logrus.Errorf("Failed to trigger %s/%s: %v", runtime.Folder, runtime.Name, err)
 					triggeredJobs = append(triggeredJobs, types.TriggeredJob{
-						JobName: job, Folder: runtime.Folder, JenkinsJobName: runtime.Name, EnvironmentGroup: runtime.Environment, Parameters: params, Status: jobStatusTriggerFailed,
+						JobName: job, Folder: runtime.Folder, JenkinsJobName: runtime.Name, EnvironmentGroup: runtime.Environment,
+						DisplayName: jobDisplayName, Description: jobDescription, Parameters: params, Status: jobStatusTriggerFailed,
 					})
 					continue
 				}
 
 				triggeredJobs = append(triggeredJobs, types.TriggeredJob{
 					JobName: job, Folder: runtime.Folder, JenkinsJobName: runtime.Name, EnvironmentGroup: runtime.Environment,
-					QueueID: &queueID, Parameters: params, Status: jobStatusQueued,
+					DisplayName: jobDisplayName, Description: jobDescription, QueueID: &queueID, Parameters: params, Status: jobStatusQueued,
 				})
 			}
 		} else if localTest {

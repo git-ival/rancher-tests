@@ -71,6 +71,8 @@ type TriggeredJob struct {
 	Folder           string            `json:"folder,omitempty"`
 	JenkinsJobName   string            `json:"jenkins_job_name,omitempty"`
 	EnvironmentGroup string            `json:"environment_group,omitempty"`
+	DisplayName      string            `json:"display_name,omitempty"`
+	Description      string            `json:"description,omitempty"`
 	BuildNumber      *int              `json:"build_number"`
 	QueueID          *int              `json:"queue_id"`
 	Parameters       map[string]string `json:"parameters,omitempty"`
