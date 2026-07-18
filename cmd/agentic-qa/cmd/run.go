@@ -20,19 +20,61 @@ const (
 	stageSucceeded = "succeeded"
 	stageRunning   = "running"
 	stageFailed    = "failed"
+
+	runForceFlag = "force"
+	runFromFlag  = "from"
 )
 
-func init() { rootCmd.AddCommand(runCmd) }
+var (
+	runForce bool
+	runFrom  string
+)
+
+// coreStageNames lists the fixed pipeline stage names in execution order.
+// cleanup is omitted because it is conditionally appended.
+var coreStageNames = []string{
+	identifyCommandName,
+	planEnvironmentCommandName,
+	setupEnvironmentCommandName,
+	triggerCommandName,
+	waitCommandName,
+	analyzeCommandName,
+	defectsCommandName,
+	configFailuresCommandName,
+}
+
+func init() {
+	f := runCmd.Flags()
+	f.BoolVar(&runForce, runForceFlag, false, "Re-run every stage, ignoring prior state")
+	f.StringVar(&runFrom, runFromFlag, "", "Re-run from this stage and all subsequent stages (use stage name, e.g. trigger)")
+	rootCmd.AddCommand(runCmd)
+}
 
 var runCmd = &cobra.Command{
 	Use:   runCommandName,
 	Short: "Run or resume the Agentic QA workflow",
+	Long: `Run or resume the Agentic QA pipeline.
+
+By default the workflow resumes from where it left off, skipping stages that
+already succeeded with valid output.
+
+  --force          Re-run every stage regardless of prior state.
+  --from <stage>   Re-run from the named stage and all subsequent stages.
+                   Prior stages are skipped if they already succeeded.
+
+Stage names: identify, plan-environment, setup-env, trigger, wait, analyze,
+             defects, config-failures, cleanup
+
+--force and --from are mutually exclusive.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if runConfig == nil {
 			return fmt.Errorf("--%s is required for run", configFlag)
 		}
 		if stateFile == "" {
 			return fmt.Errorf("paths.outputs.state is required")
+		}
+		if runForce && runFrom != "" {
+			return fmt.Errorf("--%s and --%s are mutually exclusive", runForceFlag, runFromFlag)
 		}
 		if err := prepareRunInputs(cmd.Context()); err != nil {
 			return err
@@ -68,19 +110,57 @@ var runCmd = &cobra.Command{
 		if runConfig.Execution.CleanupAfterRun {
 			stages = append(stages, workflowStage{name: cleanupCommandName, command: cleanupCmd, output: runConfig.Paths.Outputs.CleanupResult})
 		}
-		force := false
-		for _, stage := range stages {
+
+		// Resolve --from index. Validated against the full stage list including
+		// the optional cleanup stage so the user always gets a clear error.
+		fromIndex, err := resolveFromStage(runFrom, stages)
+		if err != nil {
+			return err
+		}
+
+		force := runForce
+		for i, stage := range stages {
+			// --from: force once we reach the requested stage.
+			if !force && i >= fromIndex {
+				force = true
+			}
 			executed, err := executeWorkflowStage(cmd.Context(), tracker, stage, force)
 			if err != nil {
 				return err
 			}
-			force = force || executed
+			// Without --force/--from: cascade force to all stages that follow
+			// a stage that actually ran, so a partial previous run continues
+			// from the right point rather than leaving gaps.
+			if !runForce && runFrom == "" {
+				force = force || executed
+			}
 		}
 		return saveJSON(runConfig.Paths.Outputs.Summary, map[string]any{
 			"repo": runConfig.Source.Repo, "pr": runConfig.Source.PR,
 			"completed_at": time.Now().UTC().Format(time.RFC3339),
 		})
 	},
+}
+
+// resolveFromStage returns the index of the stage named by from within stages.
+// If from is empty it returns len(stages) so nothing is forced.
+// Returns an error if from is not a recognised stage name.
+func resolveFromStage(from string, stages []workflowStage) (int, error) {
+	if from == "" {
+		return len(stages), nil
+	}
+	for i, s := range stages {
+		if s.name == from {
+			return i, nil
+		}
+	}
+	// Build the valid name list from whatever stages were assembled (includes
+	// the optional cleanup stage when configured).
+	names := make([]string, len(stages))
+	for i, s := range stages {
+		names[i] = s.name
+	}
+	return 0, fmt.Errorf("unknown stage %q; valid stages: %s", from, strings.Join(names, ", "))
 }
 
 func prepareRunInputs(ctx context.Context) error {
