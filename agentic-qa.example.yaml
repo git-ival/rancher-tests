@@ -19,6 +19,7 @@ jenkins:
   url: ""
   user: ""
   environmentJob: go-pit-daily-job-updated
+  libraryBranch: main
 
 tests:
   repoUrl: https://github.com/rancher/tests

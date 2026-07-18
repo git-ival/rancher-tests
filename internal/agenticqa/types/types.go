@@ -241,6 +241,9 @@ type TriageResults struct {
 	ProductDefects []TriageEntry `json:"product_defects"`
 	TestDefects    []TriageEntry `json:"test_defects"`
 	ConfigIssues   []TriageEntry `json:"config_issues"`
+	// Unknown holds failures that could not be classified by pattern matching or
+	// the LLM. These should never be silently counted as product defects.
+	Unknown []TriageEntry `json:"unknown,omitempty"`
 }
 
 type TriageClassification string

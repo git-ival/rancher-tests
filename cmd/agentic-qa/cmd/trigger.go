@@ -352,12 +352,31 @@ func buildEnvironmentJobRuntime(job string, identified types.IdentifiedTests, ma
 				params["QA_INFRA_REPO_BRANCH"] = runConfig.QAInfra.Branch
 			}
 		}
+		if runConfig.Jenkins.LibraryBranch != "" {
+			if _, ok := declared["QA_JENKINS_LIBRARY_BRANCH"]; ok {
+				params["QA_JENKINS_LIBRARY_BRANCH"] = runConfig.Jenkins.LibraryBranch
+			}
+		}
 	}
 	var plan types.EnvironmentPlan
 	if runConfig != nil && loadJSON(runConfig.Paths.Outputs.EnvironmentPlan, &plan) == nil && plan.VersionResolution != nil {
 		versions := plan.VersionResolution
 		if versions.RancherVersion.Value != "" {
 			params["RANCHER_VERSION"] = versions.RancherVersion.Value
+		}
+		if versions.RancherImageTag.Value != "" {
+			params["RANCHER_IMAGE_TAG"] = versions.RancherImageTag.Value
+		}
+		if versions.RancherChartRepoURL != "" {
+			params["RANCHER_CHART_REPO_URL"] = versions.RancherChartRepoURL
+		}
+		if versions.CertManagerVersion.Value != "" {
+			// Rewrite the cert_manager_version literal embedded in ANSIBLE_VARIABLES.
+			// The Jenkins pipeline uses the raw ANSIBLE_VARIABLES string verbatim, so
+			// top-level parameter substitution does not reach this field.
+			if av, ok := params["ANSIBLE_VARIABLES"]; ok && av != "" {
+				params["ANSIBLE_VARIABLES"] = rewriteYAMLField(av, "cert_manager_version", versions.CertManagerVersion.Value)
+			}
 		}
 		if version, ok := versions.KubernetesVersionByDistro[types.DistroRKE2]; ok && version.Value != "" {
 			params["RKE2_VERSION"] = version.Value
@@ -380,6 +399,38 @@ func buildEnvironmentJobRuntime(job string, identified types.IdentifiedTests, ma
 		environment = setup.Groups[0].Name
 	}
 	return triggerJobRuntime{Folder: folder, Name: name, Project: project, Environment: environment, Parameters: params}, nil
+}
+
+// rewriteYAMLField replaces the value of a YAML scalar field in a multi-line
+// string without parsing the full document. It matches lines of the form:
+//
+//	key: "old"    or    key: old
+//
+// and replaces the value with the new quoted form.  Only the first match is
+// replaced. Returns the original string unchanged when the key is not found.
+func rewriteYAMLField(content, key, newValue string) string {
+	// Match: optional leading whitespace, key, colon, optional space, optional quotes, value
+	pattern := regexp.MustCompile(`(?m)^(\s*` + regexp.QuoteMeta(key) + `:\s*)("?)[^"\n]*("?)(\s*)$`)
+	quoted := `"` + newValue + `"`
+	replaced := false
+	result := pattern.ReplaceAllStringFunc(content, func(line string) string {
+		if replaced {
+			return line
+		}
+		replaced = true
+		m := pattern.FindStringSubmatch(line)
+		if m == nil {
+			return line
+		}
+		// Preserve original quoting style: if original had quotes keep them, else use bare value.
+		wasQuoted := m[2] == `"`
+		trailing := m[4]
+		if wasQuoted {
+			return m[1] + quoted + trailing
+		}
+		return m[1] + newValue + trailing
+	})
+	return result
 }
 
 func shellSafeRunSelector(functions []string) string {
@@ -514,6 +565,45 @@ func trackedQaseRuns(path string, projects []string, reuse bool) map[string]int 
 	return runs
 }
 
+// lintJobJenkinsfiles reads the Jenkinsfile for each job from the trigger
+// mapping and validates it against the Jenkins Declarative Pipeline linter.
+// Files that cannot be read are skipped with a warning (the file may not
+// exist locally). Lint failures are fatal — they prevent a build that would
+// fail immediately on the controller.
+func lintJobJenkinsfiles(ctx context.Context, jClient *jenkins.Client, jobs []string, mapping map[string]any) error {
+	jenkinsfileMapping, _ := mapping["jenkinsfile_mapping"].(map[string]any)
+	validated := map[string]struct{}{}
+	for _, job := range jobs {
+		rawPath, _ := jenkinsfileMapping[job].(string)
+		if rawPath == "" {
+			continue
+		}
+		if _, already := validated[rawPath]; already {
+			continue
+		}
+		validated[rawPath] = struct{}{}
+
+		// Resolve relative path against validation dir if configured.
+		absPath := rawPath
+		if runConfig != nil && runConfig.Paths.Inputs.ValidationDir != "" && !filepath.IsAbs(rawPath) {
+			absPath = filepath.Join(filepath.Dir(runConfig.Paths.Inputs.ValidationDir), rawPath)
+		}
+
+		script, err := os.ReadFile(absPath)
+		if err != nil {
+			logrus.Warnf("Cannot lint %s (cannot read %s): %v", job, absPath, err)
+			continue
+		}
+
+		logrus.Infof("Linting Jenkinsfile for %s: %s", job, absPath)
+		if err := jClient.ValidateJenkinsfile(ctx, string(script)); err != nil {
+			return fmt.Errorf("Jenkinsfile lint failed for job %q (%s): %w", job, absPath, err)
+		}
+		logrus.Infof("Jenkinsfile lint passed: %s", absPath)
+	}
+	return nil
+}
+
 var triggerCmd = &cobra.Command{
 	Use:   "trigger",
 	Short: "Trigger Jenkins test jobs",
@@ -637,6 +727,10 @@ var triggerCmd = &cobra.Command{
 
 		if jenkinsURL != "" && !dryRun && !localTest {
 			jClient := jenkins.NewClient(jenkinsURL, jenkinsUser, jenkinsToken)
+
+			if err := lintJobJenkinsfiles(ctx, jClient, jobsToTrigger, triggerMapping); err != nil {
+				return err
+			}
 
 			for _, job := range jobsToTrigger {
 				runtime := runtimes[job]

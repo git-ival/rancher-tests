@@ -528,7 +528,7 @@ insecure = true'''
                     def dirs = project.checkoutMultipleIsolated([
                         [repository: params.TESTS_REPO_URL, branch: params.TESTS_BRANCH, target: 'tests'],
                         [repository: params.QA_INFRA_REPO_URL, branch: params.QA_INFRA_BRANCH, target: 'qa-infra-automation']
-                    )
+                    ])
                     env.TESTS_DIR = dirs[0] // tests checkout directory
                     env.INFRA_DIR = dirs[1] // qa-infra-automation checkout directory
 

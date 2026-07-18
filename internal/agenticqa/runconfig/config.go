@@ -48,6 +48,7 @@ type JenkinsConfig struct {
 	URL            string `yaml:"url"`
 	User           string `yaml:"user"`
 	EnvironmentJob string `yaml:"environmentJob"`
+	LibraryBranch  string `yaml:"libraryBranch"`
 }
 
 type RepositoryConfig struct {

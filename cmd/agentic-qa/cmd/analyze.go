@@ -111,7 +111,7 @@ var analyzeCmd = &cobra.Command{
 			if err != nil {
 				logrus.Errorf("Failed to create LLM client for triage: %v", err)
 				for _, job := range llmNeeded {
-					result.ProductDefects = append(result.ProductDefects, types.TriageEntry{
+					result.Unknown = append(result.Unknown, types.TriageEntry{
 						TestName:       job.JobName,
 						Classification: types.ClassUnknown,
 						Confidence:     types.ConfidenceLow,
@@ -147,7 +147,7 @@ var analyzeCmd = &cobra.Command{
 					case types.ClassConfigEnvironment:
 						result.ConfigIssues = append(result.ConfigIssues, triageEntry)
 					default:
-						result.ProductDefects = append(result.ProductDefects, triageEntry)
+						result.Unknown = append(result.Unknown, triageEntry)
 					}
 				}
 			}
@@ -157,8 +157,8 @@ var analyzeCmd = &cobra.Command{
 			return fmt.Errorf("writing output: %w", err)
 		}
 
-		logrus.Infof("Triage complete: %d passed, %d product defects, %d test defects, %d config issues → %s",
-			len(result.Passed), len(result.ProductDefects), len(result.TestDefects), len(result.ConfigIssues), analyzeOutputFile)
+		logrus.Infof("Triage complete: %d passed, %d product defects, %d test defects, %d config issues, %d unknown → %s",
+			len(result.Passed), len(result.ProductDefects), len(result.TestDefects), len(result.ConfigIssues), len(result.Unknown), analyzeOutputFile)
 		return nil
 	},
 }

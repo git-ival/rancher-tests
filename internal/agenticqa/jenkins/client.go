@@ -364,6 +364,51 @@ func (c *Client) GetBuildStatus(ctx context.Context, folder, jobName string, bui
 	return status, nil
 }
 
+// ValidateJenkinsfile sends a Declarative Pipeline script to the Jenkins
+// pipeline-model-converter linter. Returns nil when the script is valid,
+// or an error containing the linter's human-readable diagnostics.
+//
+// The endpoint is POST /pipeline-model-converter/validate with a multipart
+// form field named "jenkinsfile". It responds with a plain-text "ok" or an
+// error message; HTTP 200 is returned in both cases.
+func (c *Client) ValidateJenkinsfile(ctx context.Context, script string) error {
+	validateURL := c.baseURL + "/pipeline-model-converter/validate"
+
+	var buf strings.Builder
+	boundary := "agentic-qa-boundary"
+	buf.WriteString("--" + boundary + "\r\n")
+	buf.WriteString("Content-Disposition: form-data; name=\"jenkinsfile\"\r\n\r\n")
+	buf.WriteString(script)
+	buf.WriteString("\r\n--" + boundary + "--\r\n")
+	body := buf.String()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, validateURL, strings.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("building lint request: %w", err)
+	}
+	req.Header.Set("Content-Type", "multipart/form-data; boundary="+boundary)
+	c.setAuth(req)
+	if c.crumbField != "" {
+		req.Header.Set(c.crumbField, c.crumbValue)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("sending lint request: %w", err)
+	}
+	defer resp.Body.Close()
+	responseBody, _ := io.ReadAll(resp.Body)
+	text := strings.TrimSpace(string(responseBody))
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("linter returned HTTP %d: %s", resp.StatusCode, text)
+	}
+	if strings.ToLower(text) != "ok" {
+		return fmt.Errorf("Jenkinsfile validation failed:\n%s", text)
+	}
+	return nil
+}
+
 // UpdateBuild labels a Jenkins build for Agentic QA tracking.
 func (c *Client) UpdateBuild(ctx context.Context, folder, jobName string, buildNumber int, displayName, description string) error {
 	buildURL := fmt.Sprintf("%s/job/%s/job/%s/%d/configSubmit", c.baseURL, folder, jobName, buildNumber)

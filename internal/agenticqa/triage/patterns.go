@@ -47,6 +47,12 @@ var TestDefectPatterns = []PatternRule{
 	{regexp.MustCompile(`(?i)cannot find provider`), ClassTestDefect, string(types.ConfidenceMedium), "Provider not configured in test"},
 	{regexp.MustCompile(`(?i)unable to find test case`), ClassTestDefect, string(types.ConfidenceMedium), "Missing Qase schema entry"},
 	{regexp.MustCompile(`(?i)(compilation|build constraint|does not compile)`), ClassTestDefect, string(types.ConfidenceHigh), "Test compilation error"},
+	// Groovy/Declarative Pipeline parser failures — the Jenkinsfile or shared-library
+	// script failed to compile on the Jenkins controller before any stage ran.
+	{regexp.MustCompile(`MultipleCompilationErrorsException`), ClassTestDefect, string(types.ConfidenceHigh), "Groovy compilation error in pipeline script"},
+	{regexp.MustCompile(`(?i)WorkflowScript.*expecting`), ClassTestDefect, string(types.ConfidenceHigh), "Declarative Pipeline syntax error"},
+	{regexp.MustCompile(`(?i)startup failed:.*\d+ error`), ClassTestDefect, string(types.ConfidenceHigh), "Groovy script startup failure"},
+	{regexp.MustCompile(`(?i)Jenkinsfile validation failed`), ClassTestDefect, string(types.ConfidenceHigh), "Jenkinsfile failed pre-trigger lint"},
 }
 
 // ProductDefectPatterns indicate the Rancher product has a bug.
