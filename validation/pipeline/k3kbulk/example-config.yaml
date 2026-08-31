@@ -1,0 +1,32 @@
+batch: k3k-ci
+count: 2
+parallelism: 2
+perTargetParallelism: 1
+mode: shared
+servers: 1
+agents: 0
+persistenceType: ephemeral
+createTimeout: 10m
+artifactsDir: artifacts
+
+rancher:
+  host: "ec2-54-153-98-150.us-west-1.compute.amazonaws.com"
+  tokenEnv: RANCHER_TOKEN # set env var RANCHER_TOKEN to a valid token before running
+  insecure: true
+  workspace: fleet-default
+
+discoverTargets:
+  prefix: downstream-
+  type: imported
+  address: internal
+  allowInternalAddress: false
+  weight: 1
+  parallelism: 1
+
+# Explicit targets can be combined with discovered targets.
+# targets:
+#   - name: downstream-a
+#     kubeconfig: /path/to/downstream-a.yaml
+#     kubeconfigServer: 192.0.2.10
+#     weight: 1
+#     parallelism: 2

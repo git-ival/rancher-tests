@@ -1,0 +1,1 @@
+error: error validating "STDIN": error validating data: failed to download openapi: Get "https://172.31.32.105:32062/openapi/v2?timeout=32s": dial tcp 172.31.32.105:32062: i/o timeout; if you choose to ignore these errors, turn validation off with --validate=false

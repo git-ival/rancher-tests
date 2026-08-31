@@ -1,0 +1,24 @@
+batch: 'k3k-ci-1'
+count: 1
+parallelism: 4
+perTargetParallelism: 1
+mode: shared
+servers: 1
+agents: 0
+persistenceType: ephemeral
+createTimeout: 10m
+artifactsDir: artifacts
+
+rancher:
+  host: 'ec2-54-215-243-94.us-west-1.compute.amazonaws.com'
+  tokenEnv: 'RANCHER_TOKEN'
+  insecure: true
+  workspace: fleet-default
+
+targets:
+  - name: 'downstream-0-0'
+    type: imported
+    kubeconfig: '/Users/iramis.valentin/Workspace/work/dartboard/tofu/main/aws/ival-rancher-k3k_config/downstream-0-0.yaml'
+    kubeconfigServer: '54.215.243.94'
+    weight: 1
+    parallelism: 1
