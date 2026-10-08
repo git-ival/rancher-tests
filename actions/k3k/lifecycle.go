@@ -10,6 +10,8 @@ import (
 )
 
 type LifecycleCLI interface {
+	// Create must be safe to repeat: a resumed run calls it again for any cluster that did not
+	// reach the k3k-ready stage, or whose kubeconfig is missing.
 	Create(ctx context.Context, item *ClusterState, target Target, config *Config) error
 	Register(ctx context.Context, item *ClusterState, manifest []byte) error
 	Delete(ctx context.Context, item *ClusterState, target Target) error
@@ -99,10 +101,16 @@ func (o *Orchestrator) createOne(ctx context.Context, item *ClusterState, target
 	if stage == StageFailed {
 		stage = item.ResumeStage
 	}
-	if !k3kCreated(stage) {
+
+	// CLI.Create applies a manifest, waits for readiness, and regenerates the kubeconfig, so
+	// it is safe to repeat. It is re-run when the k3k stage was never reached, and also when
+	// the kubeconfig is gone, which happens when the artifacts directory was cleaned while the
+	// state file was kept.
+	if !k3kCreated(stage) || !fileExists(item.Kubeconfig) {
 		if err := o.State.Update(item.Name, StageK3KCreating, nil); err != nil {
 			return err
 		}
+		Progress("%s: creating k3k cluster on %s (timeout %s)", item.Name, target.Name, o.Config.CreateTimeout)
 		select {
 		case targetLimit <- struct{}{}:
 		case <-ctx.Done():
@@ -113,6 +121,7 @@ func (o *Orchestrator) createOne(ctx context.Context, item *ClusterState, target
 		if err != nil {
 			return err
 		}
+		Progress("%s: k3k cluster ready, kubeconfig written", item.Name)
 		if _, err := os.Stat(item.Kubeconfig); err != nil {
 			return fmt.Errorf("generated kubeconfig: %w", err)
 		}
@@ -120,16 +129,23 @@ func (o *Orchestrator) createOne(ctx context.Context, item *ClusterState, target
 			return err
 		}
 	}
-	if _, err := os.Stat(item.Kubeconfig); err != nil {
-		return fmt.Errorf("generated kubeconfig: %w", err)
-	}
 
 	if item.RancherManagementID == "" {
 		if err := o.State.Update(item.Name, StageRancherCreating, nil); err != nil {
 			return err
 		}
+		Progress("%s: creating Rancher imported cluster (version management: %s)",
+			item.Name, o.Config.Rancher.VersionManagement)
 		labels := map[string]string{"provider.cattle.io": "k3k", "k3k-bulk.io/batch": o.Config.Batch, "k3k-bulk.io/target": target.Name}
-		if err := o.Rancher.CreateImportedCluster(ctx, item, labels); err != nil {
+		annotations := map[string]string{versionManagementAnnotation: o.Config.Rancher.VersionManagement}
+		managementID, err := o.Rancher.CreateImportedCluster(ctx, item, labels, annotations)
+		if err != nil {
+			return err
+		}
+		Progress("%s: Rancher cluster is %s", item.Name, managementID)
+		// Recorded under the state lock, because sibling goroutines serialize the whole state
+		// file while this runs.
+		if err := o.State.SetManagementID(item.Name, managementID); err != nil {
 			return err
 		}
 		if err := o.State.Update(item.Name, StageRancherCreated, nil); err != nil {
@@ -144,13 +160,31 @@ func (o *Orchestrator) createOne(ctx context.Context, item *ClusterState, target
 	if err := o.State.Update(item.Name, StageRegistering, nil); err != nil {
 		return err
 	}
+	Progress("%s: applying Rancher registration manifest", item.Name)
 	if err := o.CLI.Register(ctx, item, manifest); err != nil {
 		return err
 	}
-	if err := o.Rancher.WaitImportedClusterReady(ctx, item.RancherManagementID); err != nil {
+
+	// Registration is bounded separately so one unreachable cluster reports a useful reason
+	// instead of consuming the whole batch timeout.
+	registerCtx := ctx
+	if o.Config.RegisterTimeout > 0 {
+		var cancel context.CancelFunc
+		registerCtx, cancel = context.WithTimeout(ctx, o.Config.RegisterTimeout)
+		defer cancel()
+	}
+	Progress("%s: waiting up to %s for the cluster agent to connect to Rancher",
+		item.Name, o.Config.RegisterTimeout)
+	if err := o.Rancher.WaitImportedClusterReady(registerCtx, item.RancherManagementID); err != nil {
 		return err
 	}
+	Progress("%s: registered with Rancher", item.Name)
 	return o.State.Update(item.Name, StageRegistered, nil)
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func k3kCreated(stage Stage) bool {

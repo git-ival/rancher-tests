@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# validation/pipeline/k3kbulk -> repository root
+repo_root=$(cd "$script_dir/../../.." && pwd)
+
 usage() {
     cat <<'EOF'
 Usage: generate-config-from-dartboard.sh [options]
@@ -29,9 +33,25 @@ Options:
   --install-timeout TIME  Helm and readiness timeout (default: 10m)
   -h, --help              Show this help
 
+Cluster spec options (all optional; unset fields are written commented out):
+  --mode MODE             clusterSpec.mode: shared, virtual, or hcp
+  --servers NUMBER        clusterSpec.servers
+  --agents NUMBER         clusterSpec.agents (virtual mode only)
+  --k3s-version VERSION   clusterSpec.version, e.g. v1.36.2-k3s1
+  --persistence-type TYPE clusterSpec.persistence.type: dynamic or ephemeral
+  --storage-class-name N  clusterSpec.persistence.storageClassName
+  --storage-request-size S
+                          clusterSpec.persistence.storageRequestSize, e.g. 30Gi
+  --spec-file FILE        YAML file supplying any other clusterSpec fields
+  --set KEY=VALUE         clusterSpec value using a dotted key, repeatable
+
 The script selects downstream-*.yaml kubeconfigs, embeds no credentials in the
 generated file, and queries each host cluster for a reachable node address. Use
 --ensure-k3k in the CI step immediately before k3kbulk create.
+
+The configuration file itself is written by "k3kbulk generate-config", so every
+supported clusterSpec field appears in the output: values supplied here are
+written live, and everything else is written as a commented placeholder.
 EOF
 }
 
@@ -40,9 +60,11 @@ die() {
     exit 1
 }
 
-yaml_quote() {
-    local value=${1//\'/\'\'}
-    printf "'%s'" "$value"
+json_quote() {
+    local value=$1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    printf '"%s"' "$value"
 }
 
 absolute_path() {
@@ -73,10 +95,28 @@ k3k_version=1.1.0
 helm=helm
 kubectl=kubectl
 install_timeout=10m
+mode=
+servers=
+agents=
+k3s_version=
+persistence_type=
+storage_class_name=
+storage_request_size=
+spec_file=
+declare -a spec_sets=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         --config-dir) config_dir=${2:?}; shift 2 ;;
+        --mode) mode=${2:?}; shift 2 ;;
+        --servers) servers=${2:?}; shift 2 ;;
+        --agents) agents=${2:?}; shift 2 ;;
+        --k3s-version) k3s_version=${2:?}; shift 2 ;;
+        --persistence-type) persistence_type=${2:?}; shift 2 ;;
+        --storage-class-name) storage_class_name=${2:?}; shift 2 ;;
+        --storage-request-size) storage_request_size=${2:?}; shift 2 ;;
+        --spec-file) spec_file=${2:?}; shift 2 ;;
+        --set) spec_sets+=("${2:?}"); shift 2 ;;
         --rancher-host) rancher_host=${2:?}; shift 2 ;;
         --batch) batch=${2:?}; shift 2 ;;
         --count) count=${2:?}; shift 2 ;;
@@ -161,36 +201,55 @@ for kubeconfig in "${kubeconfigs[@]}"; do
 done
 
 umask 077
-{
-    echo "batch: $(yaml_quote "$batch")"
-    echo "count: $count"
-    echo "parallelism: $parallelism"
-    echo "perTargetParallelism: $target_parallelism"
-    echo "mode: shared"
-    echo "servers: 1"
-    echo "agents: 0"
-    echo "persistenceType: ephemeral"
-    echo "createTimeout: 10m"
-    echo "artifactsDir: artifacts"
-    echo
-    echo "rancher:"
-    echo "  host: $(yaml_quote "$rancher_host")"
-    echo "  tokenEnv: $(yaml_quote "$token_env")"
-    echo "  insecure: $rancher_insecure"
-    if [[ -n $rancher_ca ]]; then
-        echo "  caFile: $(yaml_quote "$rancher_ca")"
-    fi
-    echo "  workspace: fleet-default"
-    echo
-    echo "targets:"
-    for i in "${!kubeconfigs[@]}"; do
-        echo "  - name: $(yaml_quote "${target_names[$i]}")"
-        echo "    type: imported"
-        echo "    kubeconfig: $(yaml_quote "$(realpath "${kubeconfigs[$i]}")")"
-        echo "    kubeconfigServer: $(yaml_quote "${target_servers[$i]}")"
-        echo "    weight: 1"
-        echo "    parallelism: $target_parallelism"
-    done
-} >"$output"
+
+targets_json=$(
+    {
+        printf '['
+        for i in "${!kubeconfigs[@]}"; do
+            [[ $i -gt 0 ]] && printf ','
+            printf '{"name":%s,"type":"imported","kubeconfig":%s,"kubeconfigServer":%s,"weight":1,"parallelism":%s}' \
+                "$(json_quote "${target_names[$i]}")" \
+                "$(json_quote "$(realpath "${kubeconfigs[$i]}")")" \
+                "$(json_quote "${target_servers[$i]}")" \
+                "$target_parallelism"
+        done
+        printf ']'
+    }
+)
+
+# The configuration file is emitted by the Go generator so that every supported clusterSpec
+# field is present, live when supplied here and commented out otherwise.
+declare -a generate_args=(
+    --batch "$batch"
+    --count "$count"
+    --parallelism "$parallelism"
+    --per-target-parallelism "$target_parallelism"
+    --create-timeout 10m
+    --artifacts-dir artifacts
+    --rancher-host "$rancher_host"
+    --rancher-token-env "$token_env"
+    --rancher-workspace fleet-default
+    --targets-json -
+    --output "$output"
+)
+[[ $rancher_insecure == true ]] && generate_args+=(--rancher-insecure)
+[[ -n $rancher_ca ]] && generate_args+=(--rancher-ca "$rancher_ca")
+[[ -n $mode ]] && generate_args+=(--mode "$mode")
+[[ -n $servers ]] && generate_args+=(--servers "$servers")
+[[ -n $agents ]] && generate_args+=(--agents "$agents")
+[[ -n $k3s_version ]] && generate_args+=(--version "$k3s_version")
+[[ -n $persistence_type ]] && generate_args+=(--persistence-type "$persistence_type")
+[[ -n $storage_class_name ]] && generate_args+=(--storage-class-name "$storage_class_name")
+[[ -n $storage_request_size ]] && generate_args+=(--storage-request-size "$storage_request_size")
+[[ -n $spec_file ]] && generate_args+=(--spec-file "$spec_file")
+for pair in "${spec_sets[@]+"${spec_sets[@]}"}"; do
+    generate_args+=(--set "$pair")
+done
+
+if [[ -n ${K3KBULK:-} ]]; then
+    printf '%s' "$targets_json" | "$K3KBULK" generate-config "${generate_args[@]}"
+else
+    printf '%s' "$targets_json" | (cd "$repo_root" && go run ./validation/pipeline/k3kbulk generate-config "${generate_args[@]}")
+fi
 
 echo "Wrote $output with ${#kubeconfigs[@]} Dartboard downstream target(s)" >&2

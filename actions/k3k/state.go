@@ -121,6 +121,22 @@ func (s *BatchState) Update(name string, stage Stage, err error) error {
 	return s.saveLocked()
 }
 
+// SetManagementID records the Rancher management cluster ID for a cluster.
+//
+// It takes the state lock because sibling goroutines serialize the entire cluster map while
+// this runs; writing the field directly would race with that marshal.
+func (s *BatchState) SetManagementID(name, managementID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	item, found := s.Clusters[name]
+	if !found {
+		return fmt.Errorf("unknown cluster %q", name)
+	}
+	item.RancherManagementID = managementID
+	item.UpdatedAt = time.Now().UTC()
+	return s.saveLocked()
+}
+
 func (s *BatchState) Save() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -140,4 +156,10 @@ func (s *BatchState) saveLocked() error {
 		return err
 	}
 	return os.Rename(tmp, s.path)
+}
+
+// unmarshalState decodes a persisted batch state. It exists so tests can verify what actually
+// reached disk rather than inspecting in-memory structures.
+func unmarshalState(data []byte, state *BatchState) error {
+	return json.Unmarshal(data, state)
 }

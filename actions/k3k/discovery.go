@@ -18,6 +18,7 @@ func (r *RancherClient) DiscoverTargets(ctx context.Context, config *Config) err
 		return config.ValidateResolvedTargets()
 	}
 
+	Progress("discovering host clusters from Rancher (prefix %q)", config.DiscoverTargets.Prefix)
 	r.mu.Lock()
 	collection, err := r.client.Management.Cluster.ListAll(&types.ListOpts{})
 	r.mu.Unlock()
@@ -43,6 +44,7 @@ func (r *RancherClient) DiscoverTargets(ctx context.Context, config *Config) err
 		if err != nil {
 			return fmt.Errorf("discover target %s (%s): %w", cluster.Name, clusterType, err)
 		}
+		Progress("discovered target %s (%s) at %s", target.Name, clusterType, target.KubeconfigServer)
 		config.Targets = append(config.Targets, *target)
 		existing[target.Name] = true
 	}

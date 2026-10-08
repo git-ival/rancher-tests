@@ -1,0 +1,48 @@
+# Expose every cluster through a LoadBalancer Service.
+#
+# Each cluster gets its own Service and therefore its own address, so the fixed 443 is safe.
+# The address is allocated by the host cluster and cannot be listed in tlsSANs up front, so
+# after the cluster is ready k3kbulk discovers it and patches it into spec.tlsSANs. If no
+# address appears within lbAddressTimeout the step is skipped with a warning and the run
+# continues.
+#
+# tlsSANs[0] is the fallback the kubeconfig uses if the allocated address never lands in the
+# cluster status, so point it at a name that resolves to the load balancer.
+#
+#   export RANCHER_TOKEN='token-id:secret'
+#   go run ./validation/pipeline/k3kbulk --config ./validation/pipeline/k3kbulk/examples/04-loadbalancer.yaml create
+
+batch: k3k-lb
+count: 2
+parallelism: 2
+perTargetParallelism: 1
+createTimeout: 15m
+lbAddressTimeout: 5m
+artifactsDir: artifacts
+
+rancher:
+  host: rancher.example.com
+  tokenEnv: RANCHER_TOKEN
+  insecure: false
+  workspace: fleet-default
+
+discoverTargets:
+  prefix: downstream-
+  type: imported
+  address: external
+  weight: 1
+  parallelism: 1
+
+clusterSpec:
+  mode: shared
+  servers: 1
+  persistence:
+    type: ephemeral
+  tlsSANs:
+    - "{{ .Name }}.lb.example.com"
+  expose:
+    loadBalancer:
+      serverPort: 443
+      etcdPort: 2379
+    annotations:
+      service.beta.kubernetes.io/aws-load-balancer-internal: "true"

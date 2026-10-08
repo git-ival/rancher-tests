@@ -1,32 +1,206 @@
-batch: k3k-ci
+# k3kbulk configuration.
+#
+# Commented clusterSpec fields below are supported but unset. Uncomment one to enable it.
+# Paths are resolved relative to this file.
+#
+# clusterSpec is a Go text/template evaluated once per cluster, so a single block can
+# produce per-cluster values. Available variables:
+#   .Name              generated cluster name, e.g. k3k-ci-001
+#   .Namespace         k3k namespace, e.g. k3k-k3k-ci-001
+#   .Batch             batch prefix
+#   .Index / .Index0   one-based / zero-based ordinal within the batch
+#   .Target            assigned host cluster name
+#   .TargetType        Rancher cluster type of the host
+#   .KubeconfigServer  reachable host address
+# Functions: add, sub, mul, mod, lower, upper
+#
+# Example: tlsSANs: ["{{ .Name }}.k3k.example.com"]
+
+batch: 'k3k-ci'
 count: 2
 parallelism: 2
 perTargetParallelism: 1
-mode: shared
-servers: 1
-agents: 0
-persistenceType: ephemeral
-createTimeout: 10m
-artifactsDir: artifacts
+createTimeout: '10m'
+artifactsDir: 'artifacts'
+# lbAddressTimeout: 2m   # how long to wait for a LoadBalancer address before skipping it
 
 rancher:
-  host: "ec2-54-153-98-150.us-west-1.compute.amazonaws.com"
-  tokenEnv: RANCHER_TOKEN # set env var RANCHER_TOKEN to a valid token before running
+  host: 'rancher.example.com'
+  tokenEnv: 'RANCHER_TOKEN'
   insecure: true
-  workspace: fleet-default
+  workspace: 'fleet-default'
+  # Rancher treats a k3k virtual cluster as an imported K3s cluster. With version
+  # management enabled it deploys system-upgrade-controller and creates upgrade Plans
+  # for the cluster's nodes, which never complete because there are no real machines
+  # to upgrade, leaving the cluster stuck out of the active state.
+  # Set the K3s version with clusterSpec.version instead.
+  versionManagement: 'false'   # false, true, or system-default
 
+# Select host clusters from Rancher by display-name prefix and cluster type.
 discoverTargets:
-  prefix: downstream-
-  type: imported
-  address: internal
+  prefix: 'downstream-'
+  type: 'imported'
+  address: 'internal'
   allowInternalAddress: false
   weight: 1
   parallelism: 1
 
-# Explicit targets can be combined with discovered targets.
+# Explicit host clusters, which may be combined with discoverTargets.
 # targets:
-#   - name: downstream-a
-#     kubeconfig: /path/to/downstream-a.yaml
+#   - name: downstream-0-0
+#     type: imported
+#     kubeconfig: /path/to/downstream-0-0.yaml
 #     kubeconfigServer: 192.0.2.10
 #     weight: 1
-#     parallelism: 2
+#     parallelism: 1
+
+clusterSpec:
+  # K3s version for the virtual cluster. Defaults to the host node's Kubernetes version.
+  # Only K3s distributions are supported.
+  # version: v1.36.2-k3s1
+
+  # Cluster provisioning mode. Immutable after creation.
+  # Default: shared
+  # One of: shared, virtual, hcp
+  mode: shared
+
+  # Number of K3s server (control plane) pods. Must be at least 1.
+  # Default: 1
+  servers: 1
+
+  # Number of K3s agent pods. Only supported when mode is virtual.
+  # Default: 0
+  # agents: 0
+
+  # Options for persisting etcd data.
+  persistence:
+    # Persistence mode. Ephemeral keeps no state across pod restarts.
+    # Default: dynamic
+    # One of: dynamic, ephemeral
+    type: ephemeral
+
+    # StorageClass for the PVC. Only used when type is dynamic. Defaults to the cluster's
+    # default StorageClass.
+    # storageClassName: local-path
+
+    # Requested PVC size. Only used when type is dynamic. Immutable after creation.
+    # Default: 2G
+    # storageRequestSize: 2G
+
+  # How the virtual cluster API server is reached. ingress, loadBalancer, and nodePort are
+  # mutually exclusive; set at most one. When expose is omitted entirely, k3kbulk defaults
+  # to nodePort so the generated kubeconfig is reachable.
+  # expose:
+    # Expose the API server through an Ingress. The Ingress rule hosts are taken from tlsSANs,
+    # and tlsSANs[0] becomes the kubeconfig server URL.
+    # ingress:
+      # Annotations added to the generated Ingress.
+      # annotations: { nginx.ingress.kubernetes.io/ssl-passthrough: "true" }
+
+      # IngressClass used for the generated Ingress.
+      # ingressClassName: nginx
+
+    # Expose the API server through a LoadBalancer Service. After the cluster is ready k3kbulk
+    # discovers the allocated address and adds it to tlsSANs; if no address appears it is
+    # skipped.
+    # loadBalancer:
+      # Port for the K3s server. Zero or negative does not expose the port.
+      # Default: 443
+      # serverPort: 443
+
+      # Port for etcd. Zero or negative does not expose the port.
+      # Default: 2379
+      # etcdPort: 2379
+
+    # Expose the API server through a NodePort Service. This is the k3kbulk default.
+    # nodePort:
+      # Node port for the K3s server. A random port in 30000-32767 is allocated when unset. Use
+      # a template expression when several clusters share a host.
+      # serverPort: 30443
+
+      # Node port for etcd. A random port in 30000-32767 is allocated when unset.
+      # etcdPort: 32379
+
+    # Annotations added to the generated Service.
+    # annotations: { service.beta.kubernetes.io/aws-load-balancer-internal: "true" }
+
+  # Node labels constraining where server and agent pods are scheduled. In shared mode this
+  # also applies to workloads.
+  # nodeSelector: { disktype: ssd }
+
+  # Subject alternative names for the server certificate. With expose.ingress these also
+  # become the Ingress rule hosts, and tlsSANs[0] is used as the kubeconfig server URL.
+  # tlsSANs: ["{{ .Name }}.k3k.example.com"]
+
+  # Extra arguments for K3s server pods, for example --disable=traefik.
+  # serverArgs: ["--disable=traefik"]
+
+  # Extra arguments for K3s agent pods, for example --node-label=role=worker.
+  # agentArgs: ["--node-label=role=worker"]
+
+  # Environment variables set on server pods.
+  # serverEnvs: [{ name: HTTP_PROXY, value: "http://proxy.example.com" }]
+
+  # Environment variables set on agent pods.
+  # agentEnvs: [{ name: HTTP_PROXY, value: "http://proxy.example.com" }]
+
+  # Resource limits for server pods. Cannot be combined with serverResources.
+  # serverLimit: { cpu: "1", memory: 2Gi }
+
+  # Resource limits for agent pods. Cannot be combined with workerResources.
+  # workerLimit: { cpu: "1", memory: 2Gi }
+
+  # Limits and requests for server pods. k3k applies these as pod-level resources, which
+  # requires the PodLevelResources feature gate on the host cluster. Cannot be combined with
+  # serverLimit.
+  # Schema: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#resourcerequirements-v1-core
+  # serverResources:
+  #   limits:
+  #     cpu: "2"
+  #     memory: 4Gi
+  #   requests:
+  #     cpu: "1"
+  #     memory: 2Gi
+
+  # Limits and requests for agent pods. k3k applies these as pod-level resources, which
+  # requires the PodLevelResources feature gate on the host cluster. Cannot be combined with
+  # workerLimit.
+  # Schema: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#resourcerequirements-v1-core
+  # workerResources:
+  #   limits:
+  #     cpu: "2"
+  #     memory: 4Gi
+  #   requests:
+  #     cpu: "1"
+  #     memory: 2Gi
+
+  # Affinity rules for server pods, including node affinity and pod affinity/anti-affinity.
+  # Schema: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#affinity-v1-core
+  # serverAffinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #         - matchExpressions:
+  #             - key: disktype
+  #               operator: In
+  #               values: ["ssd"]
+  #   podAntiAffinity:
+  #     preferredDuringSchedulingIgnoredDuringExecution:
+  #       - weight: 100
+  #         podAffinityTerm:
+  #           topologyKey: kubernetes.io/hostname
+  #           labelSelector:
+  #             matchLabels:
+  #               role: server
+
+  # Affinity rules for agent pods, including node affinity and pod affinity/anti-affinity.
+  # Schema: https://kubernetes.io/docs/reference/generated/kubernetes-api/v1.31/#affinity-v1-core
+  # agentAffinity:
+  #   nodeAffinity:
+  #     requiredDuringSchedulingIgnoredDuringExecution:
+  #       nodeSelectorTerms:
+  #         - matchExpressions:
+  #             - key: disktype
+  #               operator: In
+  #               values: ["ssd"]
+

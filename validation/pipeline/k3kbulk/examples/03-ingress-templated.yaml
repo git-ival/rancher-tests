@@ -1,0 +1,46 @@
+# Expose every cluster through an Ingress, with a distinct hostname per cluster.
+#
+# k3k builds the Ingress rule hosts from tlsSANs and uses tlsSANs[0] as the kubeconfig server
+# URL, so a literal hostname here would make all five clusters claim the same host. The
+# {{ .Name }} expression produces k3k-ing-001.k3k.example.com, k3k-ing-002.k3k.example.com,
+# and so on. k3kbulk rejects count > 1 with expose.ingress and no template expression.
+#
+# The wildcard *.k3k.example.com must resolve to the ingress controller.
+#
+#   export RANCHER_TOKEN='token-id:secret'
+#   go run ./validation/pipeline/k3kbulk --config ./validation/pipeline/k3kbulk/examples/03-ingress-templated.yaml create
+
+batch: k3k-ing
+count: 5
+parallelism: 5
+perTargetParallelism: 2
+createTimeout: 15m
+artifactsDir: artifacts
+
+rancher:
+  host: rancher.example.com
+  tokenEnv: RANCHER_TOKEN
+  insecure: false
+  workspace: fleet-default
+
+discoverTargets:
+  prefix: downstream-
+  type: imported
+  address: external
+  weight: 1
+  parallelism: 2
+
+clusterSpec:
+  mode: shared
+  servers: 1
+  persistence:
+    type: ephemeral
+  tlsSANs:
+    - "{{ .Name }}.k3k.example.com"
+  expose:
+    ingress:
+      ingressClassName: nginx
+      annotations:
+        nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+        nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+        nginx.ingress.kubernetes.io/ssl-redirect: "HTTPS"

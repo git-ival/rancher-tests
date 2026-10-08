@@ -1,0 +1,107 @@
+# Every supported scheduling and resource control at once.
+#
+# serverResources and workerResources are applied by k3k as pod-level resources, so the host
+# cluster needs the PodLevelResources feature gate. They cannot be combined with serverLimit
+# or workerLimit; k3kbulk rejects that combination because k3k would silently discard the
+# limit.
+#
+# The node ports are templated because six clusters share a small set of hosts and a literal
+# port would collide. k3kbulk rejects count > 1 with fixed node ports and no template.
+#
+#   export RANCHER_TOKEN='token-id:secret'
+#   go run ./validation/pipeline/k3kbulk --config ./validation/pipeline/k3kbulk/examples/05-scheduling-and-resources.yaml create
+
+batch: k3k-adv
+count: 6
+parallelism: 3
+perTargetParallelism: 1
+createTimeout: 20m
+artifactsDir: artifacts
+
+rancher:
+  host: rancher.example.com
+  tokenEnv: RANCHER_TOKEN
+  insecure: false
+  workspace: fleet-default
+
+discoverTargets:
+  prefix: downstream-
+  type: imported
+  address: internal
+  allowInternalAddress: true
+  weight: 1
+  parallelism: 1
+
+clusterSpec:
+  mode: virtual
+  servers: 3
+  agents: 2
+  persistence:
+    type: dynamic
+    storageClassName: local-path
+    storageRequestSize: 20Gi
+
+  nodeSelector:
+    disktype: ssd
+
+  serverArgs:
+    - --disable=traefik
+    - --disable=servicelb
+  agentArgs:
+    - --node-label=k3k-bulk.io/batch=k3k-adv
+
+  serverEnvs:
+    - name: HTTP_PROXY
+      value: http://proxy.example.com:3128
+    - name: NO_PROXY
+      value: .svc,.cluster.local,10.0.0.0/8
+  agentEnvs:
+    - name: HTTP_PROXY
+      value: http://proxy.example.com:3128
+
+  serverResources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+  workerResources:
+    limits:
+      cpu: "2"
+      memory: 4Gi
+    requests:
+      cpu: "1"
+      memory: 2Gi
+
+  # Keep servers on SSD nodes, and spread a cluster's servers across hosts.
+  serverAffinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: disktype
+                operator: In
+                values: ["ssd"]
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            topologyKey: kubernetes.io/hostname
+            labelSelector:
+              matchLabels:
+                role: server
+  agentAffinity:
+    nodeAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 50
+          preference:
+            matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values: ["us-west-1a"]
+
+  expose:
+    nodePort:
+      serverPort: {{ add 30400 .Index }}
+      etcdPort: {{ add 31400 .Index }}

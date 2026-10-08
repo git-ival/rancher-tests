@@ -23,7 +23,9 @@ import (
 const pollInterval = 2 * time.Second
 
 type RancherAPI interface {
-	CreateImportedCluster(ctx context.Context, item *ClusterState, labels map[string]string) error
+	// CreateImportedCluster returns the Rancher management cluster ID. It does not write to
+	// item, because the caller records the ID through the batch state's lock.
+	CreateImportedCluster(ctx context.Context, item *ClusterState, labels, annotations map[string]string) (string, error)
 	RegistrationManifest(ctx context.Context, managementID string) ([]byte, error)
 	WaitImportedClusterReady(ctx context.Context, managementID string) error
 	DeleteImportedCluster(ctx context.Context, item *ClusterState) error
@@ -60,29 +62,38 @@ func NewRancherClient(config RancherConfig) (*RancherClient, error) {
 	return &RancherClient{client: client}, nil
 }
 
-func (r *RancherClient) CreateImportedCluster(ctx context.Context, item *ClusterState, labels map[string]string) error {
+// CreateImportedCluster creates the Rancher provisioning Cluster, or adopts an existing one so
+// that a resumed run does not fail or duplicate it.
+func (r *RancherClient) CreateImportedCluster(ctx context.Context, item *ClusterState, labels, annotations map[string]string) (string, error) {
 	r.mu.Lock()
 	if existing, err := r.client.Steve.SteveType(stevetypes.Provisioning).ByID(item.RancherProvisioningID); err == nil {
 		r.mu.Unlock()
-		return r.populateManagementID(ctx, item, existing)
+		return r.managementID(ctx, existing)
 	} else if !clientbase.IsNotFound(err) {
 		r.mu.Unlock()
-		return err
+		return "", err
 	}
 
+	// Annotations set here are copied onto the management cluster Rancher derives from this
+	// object, which is where the version management switch is read.
 	desired := &provisioningv1.Cluster{ObjectMeta: metav1.ObjectMeta{
-		Name: item.Name, Namespace: strings.SplitN(item.RancherProvisioningID, "/", 2)[0], Labels: labels,
+		Name:        item.Name,
+		Namespace:   strings.SplitN(item.RancherProvisioningID, "/", 2)[0],
+		Labels:      labels,
+		Annotations: annotations,
 	}}
 	created, err := r.client.Steve.SteveType(stevetypes.Provisioning).Create(desired)
 	r.mu.Unlock()
 	if err != nil {
-		return fmt.Errorf("create Rancher provisioning cluster: %w", err)
+		return "", fmt.Errorf("create Rancher provisioning cluster: %w", err)
 	}
-	return r.populateManagementID(ctx, item, created)
+	return r.managementID(ctx, created)
 }
 
-func (r *RancherClient) populateManagementID(ctx context.Context, item *ClusterState, object *stevev1.SteveAPIObject) error {
-	return poll(ctx, func() (bool, error) {
+// managementID waits for Rancher to assign the generated c-m-* management cluster name.
+func (r *RancherClient) managementID(ctx context.Context, object *stevev1.SteveAPIObject) (string, error) {
+	var managementID string
+	err := poll(ctx, func() (bool, error) {
 		r.mu.Lock()
 		current, err := r.client.Steve.SteveType(stevetypes.Provisioning).ByID(object.ID)
 		r.mu.Unlock()
@@ -96,9 +107,10 @@ func (r *RancherClient) populateManagementID(ctx context.Context, item *ClusterS
 		if cluster.Status.ClusterName == "" {
 			return false, nil
 		}
-		item.RancherManagementID = cluster.Status.ClusterName
+		managementID = cluster.Status.ClusterName
 		return true, nil
 	})
+	return managementID, err
 }
 
 func (r *RancherClient) RegistrationManifest(ctx context.Context, managementID string) ([]byte, error) {
@@ -140,39 +152,118 @@ func (r *RancherClient) waitRegistrationToken(ctx context.Context, managementID 
 	return token, err
 }
 
+// WaitImportedClusterReady polls until a freshly imported cluster reports ready.
+//
+// A false Ready, Connected, or AgentDeployed condition is NOT treated as terminal. Rancher
+// sets Ready=False with "Cluster agent is not connected" from the moment the cluster object
+// exists until the cattle-cluster-agent deploys and dials home, which is the normal state for
+// the first minutes after the registration manifest is applied. Failing on it aborts every
+// import immediately.
+//
+// Transient API errors are tolerated for the same reason. The most recent reason is retained
+// so that a genuine timeout reports why the cluster never became ready instead of a bare
+// context deadline.
 func (r *RancherClient) WaitImportedClusterReady(ctx context.Context, managementID string) error {
-	return poll(ctx, func() (bool, error) {
+	var lastReason string
+	started := time.Now()
+	lastReport := started
+
+	err := poll(ctx, func() (bool, error) {
 		r.mu.Lock()
 		cluster, err := r.client.Management.Cluster.ByID(managementID)
 		r.mu.Unlock()
 		if err != nil {
-			return false, err
+			lastReason = "querying Rancher failed: " + err.Error()
+			return false, nil
 		}
-		for _, condition := range cluster.Conditions {
-			if condition.Status == "False" && condition.Message != "" &&
-				(condition.Type == "Ready" || condition.Type == "Connected" || condition.Type == "AgentDeployed") {
-				return false, fmt.Errorf("Rancher cluster %s condition %s is false: %s", managementID, condition.Type, condition.Message)
-			}
+		lastReason = notReadyReason(cluster)
+		if lastReason == "" {
+			return true, nil
 		}
-		return importedClusterReady(cluster), nil
+
+		// This wait routinely lasts minutes while cattle-cluster-agent starts and connects.
+		// Restate the reason periodically so it is distinguishable from a hang.
+		if time.Since(lastReport) >= progressInterval {
+			lastReport = time.Now()
+			Progress("%s: waiting for Rancher import (%s elapsed): %s",
+				managementID, time.Since(started).Round(time.Second), lastReason)
+		}
+		return false, nil
 	})
+
+	if err != nil && lastReason != "" {
+		return fmt.Errorf("Rancher cluster %s did not become ready after %s: %s (%w)",
+			managementID, time.Since(started).Round(time.Second), lastReason, err)
+	}
+	return err
 }
 
-func importedClusterReady(cluster *management.Cluster) bool {
-	required := map[string]bool{
-		"AgentDeployed": false, "Ready": false, "SystemAccountCreated": false, "ServiceAccountSecretsMigrated": false,
+// notReadyReason returns why a cluster is not yet ready, or an empty string when it is.
+func notReadyReason(cluster *management.Cluster) string {
+	if cluster.Transitioning == "error" && cluster.TransitioningMessage != "" {
+		return "cluster entered error state: " + cluster.TransitioningMessage
 	}
+
+	// Report the most informative condition rather than the first missing one.
+	for _, conditionType := range []string{"Ready", "Connected", "AgentDeployed"} {
+		for _, condition := range cluster.Conditions {
+			if condition.Type != conditionType || condition.Status == "True" {
+				continue
+			}
+			detail := condition.Message
+			if detail == "" {
+				detail = condition.Reason
+			}
+			if detail == "" {
+				detail = "status " + condition.Status
+			}
+			return fmt.Sprintf("condition %s is not true: %s", conditionType, detail)
+		}
+	}
+
+	if missing := missingConditions(cluster); len(missing) > 0 {
+		return "waiting for conditions: " + strings.Join(missing, ", ")
+	}
+	if cluster.State != "" && cluster.State != "active" {
+		return "cluster state is " + cluster.State
+	}
+	return ""
+}
+
+// missingConditions lists the required readiness conditions that are not yet true.
+func missingConditions(cluster *management.Cluster) []string {
+	required := requiredConditions()
 	for _, condition := range cluster.Conditions {
 		if _, found := required[condition.Type]; found && condition.Status == "True" {
 			required[condition.Type] = true
 		}
 	}
-	for _, ready := range required {
-		if !ready {
-			return false
+
+	var missing []string
+	for _, name := range requiredConditionOrder {
+		if !required[name] {
+			missing = append(missing, name)
 		}
 	}
-	return true
+	return missing
+}
+
+// requiredConditionOrder lists the conditions an imported cluster must report as true. It
+// matches shepherd's IsImportedClusterReady so both agree on what "imported and ready" means.
+var requiredConditionOrder = []string{
+	"AgentDeployed", "Ready", "SystemAccountCreated", "ServiceAccountSecretsMigrated",
+}
+
+func requiredConditions() map[string]bool {
+	required := make(map[string]bool, len(requiredConditionOrder))
+	for _, name := range requiredConditionOrder {
+		required[name] = false
+	}
+	return required
+}
+
+func importedClusterReady(cluster *management.Cluster) bool {
+	return len(missingConditions(cluster)) == 0
 }
 
 func (r *RancherClient) DeleteImportedCluster(ctx context.Context, item *ClusterState) error {

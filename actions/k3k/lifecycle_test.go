@@ -36,10 +36,9 @@ type fakeRancher struct {
 	calls []string
 }
 
-func (f *fakeRancher) CreateImportedCluster(_ context.Context, item *ClusterState, _ map[string]string) error {
+func (f *fakeRancher) CreateImportedCluster(_ context.Context, _ *ClusterState, _, _ map[string]string) (string, error) {
 	f.calls = append(f.calls, "create-rancher")
-	item.RancherManagementID = "c-m-test"
-	return nil
+	return "c-m-test", nil
 }
 
 func (f *fakeRancher) RegistrationManifest(_ context.Context, _ string) ([]byte, error) {

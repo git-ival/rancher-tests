@@ -1,0 +1,50 @@
+# Highly available clusters in virtual mode, on explicitly listed hosts.
+#
+# Agents only exist in virtual mode. Dynamic persistence requires a usable StorageClass on
+# every listed host. Weighting sends twice as many clusters to the larger host.
+#
+#   export RANCHER_TOKEN='token-id:secret'
+#   go run ./validation/pipeline/k3kbulk --config ./validation/pipeline/k3kbulk/examples/02-ha-virtual.yaml create
+
+batch: k3k-ha
+count: 3
+parallelism: 3
+perTargetParallelism: 1
+createTimeout: 20m
+artifactsDir: artifacts
+
+rancher:
+  host: rancher.example.com
+  tokenEnv: RANCHER_TOKEN
+  insecure: true
+  workspace: fleet-default
+
+targets:
+  - name: downstream-0-0
+    type: imported
+    kubeconfig: ./kubeconfigs/downstream-0-0.yaml
+    kubeconfigServer: 192.0.2.10
+    weight: 2
+    parallelism: 2
+  - name: downstream-0-1
+    type: imported
+    kubeconfig: ./kubeconfigs/downstream-0-1.yaml
+    kubeconfigServer: 192.0.2.11
+    weight: 1
+    parallelism: 1
+
+clusterSpec:
+  mode: virtual
+  servers: 3
+  agents: 3
+  version: v1.36.2-k3s1
+  persistence:
+    type: dynamic
+    storageClassName: local-path
+    storageRequestSize: 30Gi
+  serverLimit:
+    cpu: "1"
+    memory: 2Gi
+  workerLimit:
+    cpu: "1"
+    memory: 2Gi

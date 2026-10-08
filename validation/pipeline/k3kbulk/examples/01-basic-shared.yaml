@@ -1,0 +1,35 @@
+# Smallest useful batch: shared mode, ephemeral storage, hosts discovered from Rancher.
+#
+# expose is omitted, so k3kbulk adds `expose: {nodePort: {}}` and each cluster's kubeconfig
+# points at the host node address that discovery selected. This is the configuration to start
+# a new environment with.
+#
+#   export RANCHER_TOKEN='token-id:secret'
+#   go run ./validation/pipeline/k3kbulk --config ./validation/pipeline/k3kbulk/examples/01-basic-shared.yaml create
+
+batch: k3k-basic
+count: 4
+parallelism: 4
+perTargetParallelism: 2
+createTimeout: 10m
+artifactsDir: artifacts
+
+rancher:
+  host: rancher.example.com
+  tokenEnv: RANCHER_TOKEN
+  insecure: false
+  workspace: fleet-default
+
+discoverTargets:
+  prefix: downstream-
+  type: imported
+  address: external
+  allowInternalAddress: false
+  weight: 1
+  parallelism: 2
+
+clusterSpec:
+  mode: shared
+  servers: 1
+  persistence:
+    type: ephemeral
